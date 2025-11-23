@@ -42,8 +42,8 @@ type ServerSpec struct {
 func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma.Server, error) {
 	klog.V(2).Infof("Creating CloudSigma server: %s (CPU: %d MHz, Memory: %d MB)", spec.Name, spec.CPU, spec.Memory)
 
-	// Build server request
-	req := &cloudsigma.ServerCreateRequest{
+	// Build server object
+	server := &cloudsigma.Server{
 		Name:   spec.Name,
 		CPU:    spec.CPU,
 		Memory: spec.Memory,
@@ -51,13 +51,13 @@ func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma
 
 	// Add disks
 	for _, disk := range spec.Disks {
-		req.Drives = append(req.Drives, cloudsigma.ServerDrive{
+		server.Drives = append(server.Drives, cloudsigma.ServerDrive{
 			BootOrder:  disk.BootOrder,
 			DevChannel: fmt.Sprintf("0:%d", disk.BootOrder),
 			Device:     disk.Device,
 			Drive: &cloudsigma.Drive{
 				UUID: disk.UUID,
-				Size: disk.Size,
+				Size: int(disk.Size),
 			},
 		})
 	}
@@ -72,56 +72,66 @@ func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma
 
 		// Configure IP
 		if nic.IPv4Conf.Conf == "dhcp" {
-			nicReq.IPv4Configuration = &cloudsigma.IPv4Configuration{
-				Conf: "dhcp",
+			nicReq.IP4Configuration = &cloudsigma.ServerIPConfiguration{
+				Type: "dhcp",
 			}
 		} else if nic.IPv4Conf.Conf == "static" && nic.IPv4Conf.IP != nil {
-			nicReq.IPv4Configuration = &cloudsigma.IPv4Configuration{
-				Conf: "static",
-				IP: &cloudsigma.IP{
+			nicReq.IP4Configuration = &cloudsigma.ServerIPConfiguration{
+				Type: "static",
+				IPAddress: &cloudsigma.IP{
 					UUID: nic.IPv4Conf.IP.UUID,
 				},
 			}
 		}
 
-		req.NICs = append(req.NICs, nicReq)
+		server.NICs = append(server.NICs, nicReq)
 	}
 
 	// Add metadata (cloud-init)
 	if spec.BootstrapData != "" {
-		if req.Meta == nil {
-			req.Meta = make(map[string]interface{})
+		if server.Meta == nil {
+			server.Meta = make(map[string]interface{})
 		}
-		req.Meta["base64_fields"] = "cloudinit-user-data"
-		req.Meta["cloudinit-user-data"] = spec.BootstrapData
+		server.Meta["base64_fields"] = "cloudinit-user-data"
+		server.Meta["cloudinit-user-data"] = spec.BootstrapData
 	}
 
 	// Add custom metadata
 	if len(spec.Meta) > 0 {
-		if req.Meta == nil {
-			req.Meta = make(map[string]interface{})
+		if server.Meta == nil {
+			server.Meta = make(map[string]interface{})
 		}
 		for k, v := range spec.Meta {
-			req.Meta[k] = v
+			server.Meta[k] = v
 		}
 	}
 
 	// Add tags
 	if len(spec.Tags) > 0 {
-		req.Tags = make([]cloudsigma.Tag, len(spec.Tags))
+		server.Tags = make([]cloudsigma.Tag, len(spec.Tags))
 		for i, tag := range spec.Tags {
-			req.Tags[i] = cloudsigma.Tag{Name: tag}
+			server.Tags[i] = cloudsigma.Tag{Name: tag}
 		}
 	}
 
+	// Create server request
+	req := &cloudsigma.ServerCreateRequest{
+		Servers: []cloudsigma.Server{*server},
+	}
+
 	// Create server
-	server, _, err := c.sdk.Servers.Create(ctx, req)
+	servers, _, err := c.sdk.Servers.Create(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create server: %w", err)
 	}
 
-	klog.V(2).Infof("Server created successfully: %s (UUID: %s)", server.Name, server.UUID)
-	return server, nil
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("server creation returned no servers")
+	}
+
+	createdServer := servers[0]
+	klog.V(2).Infof("Server created successfully: %s (UUID: %s)", createdServer.Name, createdServer.UUID)
+	return &createdServer, nil
 }
 
 // GetServer retrieves a server by UUID
@@ -143,7 +153,7 @@ func (c *Client) GetServer(ctx context.Context, uuid string) (*cloudsigma.Server
 func (c *Client) StartServer(ctx context.Context, uuid string) error {
 	klog.V(2).Infof("Starting server: %s", uuid)
 
-	_, err := c.sdk.Servers.Start(ctx, uuid)
+	_, _, err := c.sdk.Servers.Start(ctx, uuid)
 	if err != nil {
 		return fmt.Errorf("failed to start server: %w", err)
 	}
@@ -156,7 +166,7 @@ func (c *Client) StartServer(ctx context.Context, uuid string) error {
 func (c *Client) StopServer(ctx context.Context, uuid string) error {
 	klog.V(2).Infof("Stopping server: %s", uuid)
 
-	_, err := c.sdk.Servers.Stop(ctx, uuid)
+	_, _, err := c.sdk.Servers.Stop(ctx, uuid)
 	if err != nil {
 		return fmt.Errorf("failed to stop server: %w", err)
 	}

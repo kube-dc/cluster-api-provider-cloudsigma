@@ -5,6 +5,14 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
+const (
+	// NetworkReadyCondition reports on the successful reconciliation of CloudSigma network
+	NetworkReadyCondition clusterv1.ConditionType = "NetworkReady"
+
+	// NetworkCreateFailedReason used when network/VLAN creation fails
+	NetworkCreateFailedReason = "NetworkCreateFailed"
+)
+
 // CloudSigmaClusterSpec defines the desired state of CloudSigmaCluster
 type CloudSigmaClusterSpec struct {
 	// ControlPlaneEndpoint represents the endpoint used to communicate with the control plane.
@@ -137,6 +145,16 @@ type CloudSigmaClusterList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CloudSigmaCluster `json:"items"`
+}
+
+// GetConditions returns the conditions for the CloudSigmaCluster
+func (c *CloudSigmaCluster) GetConditions() clusterv1.Conditions {
+	return c.Status.Conditions
+}
+
+// SetConditions sets the conditions for the CloudSigmaCluster
+func (c *CloudSigmaCluster) SetConditions(conditions clusterv1.Conditions) {
+	c.Status.Conditions = conditions
 }
 
 func init() {

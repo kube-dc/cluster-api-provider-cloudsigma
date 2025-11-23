@@ -53,38 +53,18 @@ func (c *Client) ListVLANs(ctx context.Context) ([]cloudsigma.VLAN, error) {
 }
 
 // CreateVLAN creates a new VLAN
+// Note: CloudSigma VLAN creation is typically done through the web UI or requires special permissions
+// This is a placeholder for future implementation
 func (c *Client) CreateVLAN(ctx context.Context, name string, meta map[string]string) (*cloudsigma.VLAN, error) {
-	klog.V(2).Infof("Creating VLAN: %s", name)
-
-	req := &cloudsigma.VLANCreateRequest{
-		Name: name,
-	}
-
-	if len(meta) > 0 {
-		req.Meta = make(map[string]interface{})
-		for k, v := range meta {
-			req.Meta[k] = v
-		}
-	}
-
-	vlan, _, err := c.sdk.VLANs.Create(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create VLAN: %w", err)
-	}
-
-	klog.V(2).Infof("VLAN created successfully: %s (UUID: %s)", vlan.Name, vlan.UUID)
-	return vlan, nil
+	klog.V(2).Infof("VLAN creation not implemented - VLANs should be created through CloudSigma UI: %s", name)
+	return nil, fmt.Errorf("VLAN creation not supported via SDK - please create VLAN through CloudSigma UI and specify UUID")
 }
 
 // DeleteVLAN deletes a VLAN
+// Note: CloudSigma VLAN deletion is typically done through the web UI
+// This is a placeholder for future implementation
 func (c *Client) DeleteVLAN(ctx context.Context, uuid string) error {
-	klog.V(2).Infof("Deleting VLAN: %s", uuid)
-
-	_, err := c.sdk.VLANs.Delete(ctx, uuid)
-	if err != nil {
-		return fmt.Errorf("failed to delete VLAN: %w", err)
-	}
-
-	klog.V(2).Infof("VLAN deleted successfully: %s", uuid)
+	klog.V(2).Infof("VLAN deletion not implemented: %s", uuid)
+	// VLANs are typically not deleted automatically to avoid breaking other servers
 	return nil
 }

@@ -5,6 +5,17 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
+const (
+	// ServerReadyCondition reports on the successful reconciliation of CloudSigma server
+	ServerReadyCondition clusterv1.ConditionType = "ServerReady"
+
+	// ServerCreateFailedReason used when server creation fails
+	ServerCreateFailedReason = "ServerCreateFailed"
+
+	// ServerDeleteFailedReason used when server deletion fails
+	ServerDeleteFailedReason = "ServerDeleteFailed"
+)
+
 // CloudSigmaMachineSpec defines the desired state of CloudSigmaMachine
 type CloudSigmaMachineSpec struct {
 	// ProviderID is the unique identifier as specified by the cloud provider
@@ -137,6 +148,16 @@ type CloudSigmaMachineList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CloudSigmaMachine `json:"items"`
+}
+
+// GetConditions returns the conditions for the CloudSigmaMachine
+func (m *CloudSigmaMachine) GetConditions() clusterv1.Conditions {
+	return m.Status.Conditions
+}
+
+// SetConditions sets the conditions for the CloudSigmaMachine
+func (m *CloudSigmaMachine) SetConditions(conditions clusterv1.Conditions) {
+	m.Status.Conditions = conditions
 }
 
 func init() {
