@@ -54,3 +54,5 @@ Thumbs.db
 
 # Logs
 *.log
+.env.local
+*.env.local
