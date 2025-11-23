@@ -1,0 +1,214 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+  name: cloudsigmaclusters.infrastructure.cluster.x-k8s.io
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: CloudSigmaCluster
+    listKind: CloudSigmaClusterList
+    plural: cloudsigmaclusters
+    singular: cloudsigmacluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Cluster
+      jsonPath: .metadata.labels.cluster\.x-k8s\.io/cluster-name
+      name: Cluster
+      type: string
+    - description: Cluster infrastructure is ready
+      jsonPath: .status.ready
+      name: Ready
+      type: string
+    - description: CloudSigma region
+      jsonPath: .spec.region
+      name: Region
+      type: string
+    - description: Control plane endpoint
+      jsonPath: .spec.controlPlaneEndpoint.host
+      name: Endpoint
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: CloudSigmaCluster is the Schema for the cloudsigmaclusters API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: CloudSigmaClusterSpec defines the desired state of CloudSigmaCluster
+            properties:
+              controlPlaneEndpoint:
+                description: ControlPlaneEndpoint represents the endpoint used to
+                  communicate with the control plane.
+                properties:
+                  host:
+                    description: The hostname on which the API server is serving.
+                    type: string
+                  port:
+                    description: The port on which the API server is serving.
+                    format: int32
+                    type: integer
+                required:
+                - host
+                - port
+                type: object
+              credentialsRef:
+                description: CredentialsRef is a reference to a Secret containing
+                  CloudSigma credentials
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced object
+                    type: string
+                required:
+                - name
+                type: object
+              loadBalancer:
+                description: LoadBalancer specifies the load balancer configuration
+                properties:
+                  enabled:
+                    description: Enabled specifies whether to create a load balancer
+                    type: boolean
+                  type:
+                    description: Type specifies the load balancer type (tcp or http)
+                    enum:
+                    - tcp
+                    - http
+                    type: string
+                required:
+                - enabled
+                type: object
+              region:
+                description: Region is the CloudSigma datacenter region (e.g., "zrh",
+                  "fra", "next")
+                type: string
+              vlan:
+                description: VLAN specifies the VLAN configuration for the cluster
+                  network
+                properties:
+                  cidr:
+                    description: CIDR is the IP range for a new VLAN (e.g., "10.220.0.0/16")
+                    pattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$
+                    type: string
+                  name:
+                    description: Name is the name for a new VLAN to create
+                    type: string
+                  uuid:
+                    description: UUID is the existing VLAN UUID to use
+                    type: string
+                type: object
+            required:
+            - region
+            type: object
+          status:
+            description: CloudSigmaClusterStatus defines the observed state of CloudSigmaCluster
+            properties:
+              conditions:
+                description: Conditions defines current service state of the cluster
+                items:
+                  description: Condition defines an observation of a Cluster API resource
+                    operational state.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        Last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed. If that is not known, then using the time when
+                        the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A human readable message indicating details about the transition.
+                        This field may be empty.
+                      type: string
+                    reason:
+                      description: |-
+                        The reason for the condition's last transition in CamelCase.
+                        The specific API may choose whether or not this field is considered a guaranteed API.
+                        This field may not be empty.
+                      type: string
+                    severity:
+                      description: |-
+                        Severity provides an explicit classification of Reason code, so the users or machines can immediately
+                        understand the current situation and act accordingly.
+                        The Severity field MUST be set only when Status=False.
+                      type: string
+                    status:
+                      description: Status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: |-
+                        Type of condition in CamelCase or in foo.example.com/CamelCase.
+                        Many .condition.type values are consistent across resources like Available, but because arbitrary conditions
+                        can be useful (see .node.status.conditions), the ability to deconflict is important.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - status
+                  - type
+                  type: object
+                type: array
+              failureMessage:
+                description: FailureMessage indicates a human-readable message about
+                  why the cluster is in a failed state
+                type: string
+              failureReason:
+                description: FailureReason indicates there is a fatal problem reconciling
+                  the cluster
+                type: string
+              loadBalancer:
+                description: LoadBalancer contains the load balancer information
+                properties:
+                  ip:
+                    description: IP is the load balancer IP address
+                    type: string
+                  ready:
+                    description: Ready indicates the load balancer is ready
+                    type: boolean
+                required:
+                - ready
+                type: object
+              network:
+                description: Network contains the cluster network information
+                properties:
+                  cidr:
+                    description: CIDR is the IP range of the network
+                    type: string
+                  vlanUUID:
+                    description: VLANUUID is the UUID of the VLAN
+                    type: string
+                type: object
+              ready:
+                description: Ready indicates the cluster infrastructure is ready
+                type: boolean
+            required:
+            - ready
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
