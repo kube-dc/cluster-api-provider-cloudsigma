@@ -1,0 +1,56 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+testbin/
+out/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+
+# Kubernetes Generated files
+**/zz_generated.*
+
+# editor and IDE paraphernalia
+.idea
+*.swp
+*.swo
+*~
+.vscode
+
+# Kubebuilder
+config/manager/manager.yaml
+config/default/manager_auth_proxy_patch.yaml
+config/default/manager_config_patch.yaml
+
+# Tilt
+.tilt-settings.json
+
+# CloudSigma credentials
+credentials.env
+*.key
+*.pem
+
+# Kustomize
+config/default/kustomization.yaml
+
+# Release artifacts
+dist/
+release/
+*.tar.gz
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
