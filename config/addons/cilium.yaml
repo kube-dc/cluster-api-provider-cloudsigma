@@ -576,6 +576,25 @@ spec:
         name: cilium-operator
     spec:
       automountServiceAccountToken: true
+      initContainers:
+      - command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Kubernetes API to be reachable via ClusterIP (kube-proxy)..."
+          until wget --spider --timeout=2 --tries=1 https://kubernetes.default.svc.cluster.local:443 2>/dev/null || \
+                wget --spider --timeout=2 --tries=1 https://10.96.0.1:443 2>/dev/null; do
+            echo "API not reachable yet, waiting for kube-proxy... (retrying in 5s)"
+            sleep 5
+          done
+          echo "Kubernetes API is reachable! Starting cilium-operator..."
+        image: busybox:1.36
+        name: wait-for-kube-proxy
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
       containers:
       - args:
         - --config-dir=/tmp/cilium/config-map
@@ -593,10 +612,6 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
-        - name: KUBERNETES_SERVICE_HOST
-          value: "${CONTROL_PLANE_ENDPOINT_HOST}"
-        - name: KUBERNETES_SERVICE_PORT
-          value: "${CONTROL_PLANE_ENDPOINT_PORT}"
         - name: CILIUM_DEBUG
           valueFrom:
             configMapKeyRef:
@@ -608,10 +623,6 @@ spec:
             resourceFieldRef:
               divisor: '1'
               resource: limits.memory
-        - name: KUBERNETES_SERVICE_HOST
-          value: 168.119.17.56
-        - name: KUBERNETES_SERVICE_PORT
-          value: '6443'
         image: quay.io/cilium/operator-generic:v1.16.5
         imagePullPolicy: IfNotPresent
         livenessProbe:
