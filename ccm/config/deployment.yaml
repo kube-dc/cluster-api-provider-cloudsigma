@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudsigma-ccm
+  namespace: capcs-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudsigma-ccm
+rules:
+  # Watch CAPI Clusters and Machines in management cluster
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["clusters", "machines"]
+    verbs: ["get", "list", "watch"]
+  # Get kubeconfig secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  # For leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudsigma-ccm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudsigma-ccm
+subjects:
+  - kind: ServiceAccount
+    name: cloudsigma-ccm
+    namespace: capcs-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudsigma-ccm
+  namespace: capcs-system
+  labels:
+    app: cloudsigma-ccm
+    control-plane: cloudsigma-ccm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudsigma-ccm
+      control-plane: cloudsigma-ccm
+  template:
+    metadata:
+      labels:
+        app: cloudsigma-ccm
+        control-plane: cloudsigma-ccm
+    spec:
+      serviceAccountName: cloudsigma-ccm
+      containers:
+      - name: manager
+        image: docker.io/shalb/cloudsigma-ccm:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - /ccm
+        args:
+        - --leader-elect
+        - --metrics-bind-address=:8080
+        - --health-probe-bind-address=:8081
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        - name: health
+          containerPort: 8081
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 10
