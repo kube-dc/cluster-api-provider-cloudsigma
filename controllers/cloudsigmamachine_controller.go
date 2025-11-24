@@ -220,6 +220,18 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 	// Server exists, update its state
 	if server != nil {
 		cloudSigmaMachine.Status.InstanceState = server.Status
+
+		// Extract and populate network addresses from CloudSigma API
+		addresses, err := cloudClient.GetServerAddressesWithClient(ctx, server)
+		if err != nil {
+			log.Error(err, "Failed to get server addresses", "instanceID", server.UUID)
+		} else if len(addresses) > 0 {
+			cloudSigmaMachine.Status.Addresses = addresses
+			log.Info("Populated server addresses", "instanceID", server.UUID, "addresses", addresses)
+		} else if server.Status == "running" {
+			log.V(2).Info("Server running but no addresses found yet", "instanceID", server.UUID)
+		}
+
 		if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
 			log.V(4).Info("Failed to update instance state", "error", err)
 			// Don't fail on status update conflicts here
@@ -234,12 +246,18 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 
-		// Set ready condition
+		// Set ready condition when server is running and has addresses
 		if server.Status == "running" {
 			conditions.MarkTrue(cloudSigmaMachine, infrav1.ServerReadyCondition)
 			cloudSigmaMachine.Status.Ready = true
 			if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
 				log.V(4).Info("Failed to update ready status", "error", err)
+			}
+
+			// If server is running but no addresses yet, requeue to check again
+			if len(addresses) == 0 {
+				log.Info("Server running but waiting for IP address assignment", "instanceID", server.UUID)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 		}
 	}

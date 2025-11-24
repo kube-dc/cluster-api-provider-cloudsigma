@@ -22,6 +22,7 @@ import (
 
 	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
 	"k8s.io/klog/v2"
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 
 	infrav1 "github.com/kube-dc/cluster-api-provider-cloudsigma/api/v1beta1"
 )
@@ -191,6 +192,103 @@ func (c *Client) GetServer(ctx context.Context, uuid string) (*cloudsigma.Server
 	}
 
 	return server, nil
+}
+
+// GetServerAddresses extracts network addresses from a CloudSigma Server
+// Returns addresses in CAPI MachineAddress format for node registration
+// Note: For DHCP/NAT configurations, the IP is assigned by CloudSigma but may not
+// appear in the API until the server is fully booted. Use GetServerAddressesWithClient
+// to fetch IPs from the API if needed.
+func GetServerAddresses(server *cloudsigma.Server) []clusterv1.MachineAddress {
+	if server == nil {
+		return nil
+	}
+
+	addresses := []clusterv1.MachineAddress{}
+
+	// Extract IP addresses from runtime NICs
+	// Runtime field is populated when server is running and contains actual network state
+	if server.Runtime != nil && server.Runtime.RuntimeNICs != nil {
+		for _, nic := range server.Runtime.RuntimeNICs {
+			// IPv4 address - runtime NICs contain the actual IP UUIDs
+			if nic.IPv4.UUID != "" {
+				// We have the IP UUID but not the address string yet
+				// Need to fetch it separately - see GetServerAddressesWithClient
+				klog.V(4).Infof("Found runtime IPv4 UUID: %s", nic.IPv4.UUID)
+			}
+		}
+	}
+
+	// Check static NICs configuration (configured IPs, not runtime)
+	if server.NICs != nil {
+		for _, nic := range server.NICs {
+			if nic.IP4Configuration != nil && nic.IP4Configuration.IPAddress != nil {
+				uuid := nic.IP4Configuration.IPAddress.UUID
+				if uuid != "" {
+					klog.V(4).Infof("Found static IPv4 config UUID: %s", uuid)
+				}
+			}
+		}
+	}
+
+	if len(addresses) == 0 {
+		klog.V(2).Infof("No IP addresses found for server %s (status: %s), may need to fetch from API", server.UUID, server.Status)
+	}
+
+	return addresses
+}
+
+// GetServerAddressesWithClient fetches server addresses by retrieving IP resources from CloudSigma API
+// This is needed because Server objects contain IP UUIDs but not the actual IP address strings
+func (c *Client) GetServerAddressesWithClient(ctx context.Context, server *cloudsigma.Server) ([]clusterv1.MachineAddress, error) {
+	if server == nil {
+		return nil, nil
+	}
+
+	addresses := []clusterv1.MachineAddress{}
+	ipUUIDs := make(map[string]bool) // Track UUIDs to avoid duplicates
+
+	// Get IP UUIDs from runtime NICs (preferred - shows actual running state)
+	if server.Runtime != nil && server.Runtime.RuntimeNICs != nil {
+		for _, nic := range server.Runtime.RuntimeNICs {
+			if nic.IPv4.UUID != "" {
+				ipUUIDs[nic.IPv4.UUID] = true
+			}
+		}
+	}
+
+	// Also check static NIC configuration if no runtime IPs
+	if len(ipUUIDs) == 0 && server.NICs != nil {
+		for _, nic := range server.NICs {
+			if nic.IP4Configuration != nil && nic.IP4Configuration.IPAddress != nil {
+				if nic.IP4Configuration.IPAddress.UUID != "" {
+					ipUUIDs[nic.IP4Configuration.IPAddress.UUID] = true
+				}
+			}
+		}
+	}
+
+	// Fetch each IP resource to get the actual IP address string
+	// In CloudSigma, the IP address itself is used as the UUID for IP resources
+	for uuid := range ipUUIDs {
+		ip, err := c.GetIP(ctx, uuid)
+		if err != nil {
+			klog.V(2).Infof("Failed to fetch IP %s: %v", uuid, err)
+			continue
+		}
+		
+		// CloudSigma uses the IP address as the UUID, so ip.UUID contains the actual IP
+		ipAddr := ip.UUID
+		if ipAddr != "" {
+			addresses = append(addresses, clusterv1.MachineAddress{
+				Type:    clusterv1.MachineInternalIP,
+				Address: ipAddr,
+			})
+			klog.V(2).Infof("Found IP address for server %s: %s", server.UUID, ipAddr)
+		}
+	}
+
+	return addresses, nil
 }
 
 // StartServer starts a stopped server
