@@ -1,5 +1,9 @@
 # Image URL to use all building/pushing image targets
-IMG ?= ghcr.io/kube-dc/cluster-api-provider-cloudsigma:latest
+REGISTRY_REPO ?= shalb
+IMAGE_NAME ?= cluster-api-provider-cloudsigma
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+IMG ?= $(REGISTRY_REPO)/$(IMAGE_NAME):$(VERSION)
+IMG_LATEST ?= $(REGISTRY_REPO)/$(IMAGE_NAME):latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -55,11 +59,32 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
+	@echo "Building image: ${IMG}"
 	docker build -t ${IMG} .
+	@echo "Image built: ${IMG}"
+
+.PHONY: docker-build-latest
+docker-build-latest: docker-build ## Build and tag as latest.
+	docker tag ${IMG} ${IMG_LATEST}
+	@echo "Tagged as latest: ${IMG_LATEST}"
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
+	@echo "Pushing image: ${IMG}"
 	docker push ${IMG}
+	@echo "Image pushed: ${IMG}"
+
+.PHONY: docker-push-latest
+docker-push-latest: docker-push ## Push both versioned and latest tags.
+	@echo "Pushing latest: ${IMG_LATEST}"
+	docker push ${IMG_LATEST}
+	@echo "Latest pushed: ${IMG_LATEST}"
+
+.PHONY: docker-build-push
+docker-build-push: docker-build-latest docker-push-latest ## Build and push both versioned and latest images.
+	@echo "✅ Images built and pushed successfully"
+	@echo "  - ${IMG}"
+	@echo "  - ${IMG_LATEST}"
 
 ##@ Deployment
 

@@ -40,7 +40,7 @@ type ServerSpec struct {
 
 // CreateServer creates a new CloudSigma server
 func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma.Server, error) {
-	klog.Infof("==> CreateServer called for: %s (CPU: %d MHz, Memory: %d MB, Disks: %d)", 
+	klog.Infof("==> CreateServer called for: %s (CPU: %d MHz, Memory: %d MB, Disks: %d)",
 		spec.Name, spec.CPU, spec.Memory, len(spec.Disks))
 
 	// Clone drives first (CloudSigma requires unique drive per server)
@@ -49,7 +49,7 @@ func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma
 		klog.Infof("==> Disk %d: UUID=%s, Size=%d", i, disk.UUID, disk.Size)
 		driveName := fmt.Sprintf("%s-drive-%d", spec.Name, i)
 		klog.Infof("==> Starting drive clone: source=%s, name=%s", disk.UUID, driveName)
-		
+
 		clonedDrive, err := c.CloneDrive(ctx, disk.UUID, driveName, disk.Size)
 		if err != nil {
 			klog.Errorf("==> Clone failed: %v", err)
@@ -62,7 +62,7 @@ func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma
 		klog.Infof("==> Clone succeeded: %s", clonedDrive.UUID)
 		clonedDrives = append(clonedDrives, clonedDrive.UUID)
 	}
-	
+
 	klog.Infof("==> All drives cloned: %v", clonedDrives)
 
 	// Build custom server object (using strings for drive/VLAN references)
@@ -70,25 +70,25 @@ func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma
 		Name:        spec.Name,
 		CPU:         spec.CPU,
 		Memory:      spec.Memory * 1024 * 1024, // Convert MB to bytes
-		VNCPassword: "kubernetes",                // Required by CloudSigma API
+		VNCPassword: "kubernetes",              // Required by CloudSigma API
 	}
 
 	// Add cloned disks
 	for i, disk := range spec.Disks {
 		driveUUID := clonedDrives[i]
 		klog.Infof("==> Adding drive %d: UUID=%s", i, driveUUID)
-		
+
 		serverDrive := CustomServerDrive{
 			BootOrder:  disk.BootOrder,
 			DevChannel: fmt.Sprintf("0:%d", disk.BootOrder),
 			Device:     disk.Device,
 			Drive:      driveUUID, // Just the UUID string
 		}
-		klog.Infof("==> ServerDrive: BootOrder=%d, DevChannel=%s, Device=%s, Drive=%s", 
+		klog.Infof("==> ServerDrive: BootOrder=%d, DevChannel=%s, Device=%s, Drive=%s",
 			serverDrive.BootOrder, serverDrive.DevChannel, serverDrive.Device, serverDrive.Drive)
 		server.Drives = append(server.Drives, serverDrive)
 	}
-	
+
 	klog.Infof("==> Total server drives: %d", len(server.Drives))
 
 	// Add NICs with VLAN and IPv4 configuration (if specified)
@@ -100,25 +100,25 @@ func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma
 				customNIC := CustomServerNIC{
 					VLAN: nic.VLAN, // VLAN UUID string
 				}
-				
+
 				// Add IPv4 configuration if specified
 				if nic.IPv4Conf.Conf != "" {
 					customNIC.IPv4Conf = &CustomIPv4Conf{
 						Conf: nic.IPv4Conf.Conf,
 					}
-					
+
 					// Add static IP reference if provided
 					if nic.IPv4Conf.IP != nil && nic.IPv4Conf.IP.UUID != "" {
 						customNIC.IPv4Conf.IP = &CustomIPRef{
 							UUID: nic.IPv4Conf.IP.UUID,
 						}
 					}
-					
+
 					klog.Infof("==> NIC %d: VLAN=%s, IPv4Conf=%s", i, nic.VLAN, nic.IPv4Conf.Conf)
 				} else {
 					klog.Warningf("==> NIC %d: VLAN specified but no IPv4 config", i)
 				}
-				
+
 				server.NICs = append(server.NICs, customNIC)
 			} else {
 				// NIC without VLAN - create PUBLIC IP with DHCP
@@ -241,7 +241,7 @@ func (c *Client) DeleteServer(ctx context.Context, uuid string) error {
 			driveUUIDs = append(driveUUIDs, drive.Drive.UUID)
 		}
 	}
-	
+
 	// Remember IP UUIDs for cleanup (public IPs without VLAN)
 	ipUUIDs := make([]string, 0)
 	for _, nic := range server.NICs {
@@ -278,7 +278,7 @@ func (c *Client) DeleteServer(ctx context.Context, uuid string) error {
 			// Continue with other drives even if one fails
 		}
 	}
-	
+
 	// Clean up allocated public IPs
 	for _, ipUUID := range ipUUIDs {
 		klog.V(2).Infof("Releasing public IP: %s", ipUUID)

@@ -70,51 +70,56 @@ See [CRD Documentation](docs/crd-reference.md) for detailed specifications.
 
 ## Quick Start
 
-### 1. Install CAPCS
+### 1. Install CAPCS Provider
 
 ```bash
-# Install Cluster API core
-clusterctl init
+# Install the CloudSigma CAPI provider
+kubectl apply -f https://raw.githubusercontent.com/kube-dc/cluster-api-provider-cloudsigma/main/config/install.yaml
 
-# Install CloudSigma provider
-clusterctl init --infrastructure cloudsigma
+# Or from local config
+kubectl apply -f config/install.yaml
 ```
 
-### 2. Configure Credentials
+### 2. Configure CloudSigma Credentials
 
 ```bash
 # Create secret with CloudSigma credentials
 kubectl create secret generic cloudsigma-credentials \
-  --namespace=default \
+  --namespace=capcs-system \
   --from-literal=username='your-email@example.com' \
-  --from-literal=password='your-api-password'
+  --from-literal=password='your-api-password' \
+  --from-literal=region='zrh'
+
+# Verify provider is running
+kubectl get pods -n capcs-system
+kubectl logs -n capcs-system -l control-plane=controller-manager
 ```
 
-### 3. Create a Cluster
+### 3. Install CRDs
 
 ```bash
-# Generate cluster manifest
-clusterctl generate cluster my-cluster \
-  --infrastructure cloudsigma \
-  --kubernetes-version v1.34.0 \
-  --control-plane-machine-count 3 \
-  --worker-machine-count 3 > my-cluster.yaml
-
-# Apply manifest
-kubectl apply -f my-cluster.yaml
-
-# Watch cluster creation
-clusterctl describe cluster my-cluster
+# Install CloudSigma CRDs
+kubectl apply -f config/crd/bases/
 ```
 
-### 4. Access the Workload Cluster
+### 4. Deploy CloudSigma Workers
 
 ```bash
-# Get kubeconfig
-clusterctl get kubeconfig my-cluster > my-cluster-kubeconfig.yaml
+# Create workers using an example
+kubectl apply -f examples/cloudsigma-test-cluster.yaml
 
-# Access cluster
-kubectl --kubeconfig=my-cluster-kubeconfig.yaml get nodes
+# Watch machines being created
+kubectl get cloudsigmamachines -A -w
+```
+
+### 5. Access Worker Nodes
+
+```bash
+# Check worker nodes joining the cluster
+kubectl get nodes
+
+# View machine details
+kubectl describe cloudsigmamachine <machine-name>
 ```
 
 ## Example Cluster
@@ -229,18 +234,24 @@ Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md)
 
 See [ROADMAP.md](ROADMAP.md) for current status and future plans.
 
-**Current Phase:** Alpha Development (Weeks 1-3)
+**Current Phase:** Alpha Development
 - [x] Project setup
 - [x] CRD definitions
-- [ ] CloudSigma SDK integration
-- [ ] Controller implementation
-- [ ] Testing framework
+- [x] CloudSigma SDK integration
+- [x] Controller implementation
+- [x] Worker node images (Ubuntu 24.04 + K8s)
+- [x] Docker image build and deployment
+- [x] Basic documentation
+- [ ] Comprehensive testing framework
+- [ ] E2E test suite
 
-**Next Phase:** Beta Release (Weeks 4-6)
-- [ ] Cloud Controller Manager
-- [ ] Worker node images
-- [ ] Documentation
+**Next Phase:** Beta Release
+- [x] Cloud Controller Manager (separate project)
+- [ ] Advanced networking features
+- [ ] Multi-region support optimization
 - [ ] Production hardening
+- [ ] Performance benchmarking
+- [ ] Security audit
 
 ## License
 

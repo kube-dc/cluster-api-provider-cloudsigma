@@ -23,10 +23,10 @@ This guide helps you get started with CloudSigma worker nodes in KubeDC.
 
 ## Prerequisites
 
-- [ ] KubeDC management cluster installed
-- [ ] CloudSigma account with API access
-- [ ] CAPCS provider installed (upcoming)
-- [ ] Worker node images prepared
+- [ ] Kubernetes management cluster v1.26+
+- [ ] CloudSigma account with API access  
+- [ ] kubectl v1.26+
+- [ ] Worker node image prepared (see `images/ubuntu-k8s/`)
 
 ## Step-by-Step Guide
 
@@ -34,142 +34,155 @@ This guide helps you get started with CloudSigma worker nodes in KubeDC.
 
 ```bash
 # Install CloudSigma CAPI provider
-kubectl apply -f https://github.com/shalb/cluster-api-provider-cloudsigma/releases/latest/download/infrastructure-components.yaml
+kubectl apply -f https://raw.githubusercontent.com/kube-dc/cluster-api-provider-cloudsigma/main/config/install.yaml
+
+# Or from local repository
+kubectl apply -f config/install.yaml
+
+# Verify installation
+kubectl get pods -n capcs-system
 ```
 
-### Step 2: Configure CloudSigma Credentials
+### Step 2: Install CRDs
+
+```bash
+# Install CloudSigma Custom Resource Definitions
+kubectl apply -f https://raw.githubusercontent.com/kube-dc/cluster-api-provider-cloudsigma/main/config/crd/bases/
+
+# Or from local repository
+kubectl apply -f config/crd/bases/
+
+# Verify CRDs
+kubectl get crd | grep cloudsigma
+```
+
+### Step 3: Configure CloudSigma Credentials
 
 ```bash
 # Create secret with CloudSigma API credentials
 kubectl create secret generic cloudsigma-credentials \
-  --namespace=kube-system \
+  --namespace=capcs-system \
   --from-literal=username='your-email@example.com' \
   --from-literal=password='your-api-password' \
   --from-literal=region='zrh'
+
+# Verify secret
+kubectl get secret cloudsigma-credentials -n capcs-system
+
+# Check provider logs
+kubectl logs -n capcs-system -l control-plane=controller-manager
 ```
 
-### Step 3: Prepare Worker Image
+### Step 4: Prepare Worker Image
 
-Option A: Use pre-built image
+Use the working Kubernetes-ready image:
+
 ```bash
-# Get image UUID from CloudSigma library
-CLOUDSIGMA_IMAGE_UUID="<your-image-uuid>"
+# Current tested image UUID (CloudSigma ZRH region)
+CLOUDSIGMA_IMAGE_UUID="4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"
+
+# This image includes:
+# - Ubuntu 24.04
+# - Kubernetes tools (kubeadm, kubelet, kubectl)
+# - Containerd runtime
+# - CloudSigma bootstrap service
+# - SSH access: user cloudsigma / password Cloud2025
 ```
 
-Option B: Build custom image
+To build your own image, see `images/ubuntu-k8s/README.md`.
+
+### Step 5: Deploy CloudSigma Workers
+
+Use one of the example configurations:
+
+**Option A: Simple 2-worker cluster** (recommended for testing)
 ```bash
-# Clone image builder
-git clone https://github.com/shalb/cloudsigma-k8s-images
-cd cloudsigma-k8s-images
-
-# Build image
-packer build -var 'cloudsigma_username=user' \
-             -var 'cloudsigma_password=pass' \
-             -var 'k8s_version=1.34.0' \
-             cloudsigma-k8s-worker.pkr.hcl
+kubectl apply -f examples/cloudsigma-test-cluster.yaml
 ```
 
-### Step 4: Create ConfigMap with Image UUID
+**Option B: Cluster with VLAN networking**
+```bash
+# First, update the VLAN UUID in the example
+kubectl apply -f examples/cloudsigma-cluster-with-vlan.yaml
+```
 
+**Option C: Manual deployment**
 ```yaml
-apiVersion: v1
-kind: ConfigMap
+# my-workers.yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: CloudSigmaMachineTemplate
 metadata:
-  name: cloudsigma-images
-  namespace: kube-system
-data:
-  ubuntu-22.04-k8s-1.34.0: "your-image-uuid-here"
-```
-
-```bash
-kubectl apply -f cloudsigma-images-configmap.yaml
-```
-
-### Step 5: Create KdcCluster with CloudSigma Workers
-
-```yaml
-# cluster-with-cloudsigma.yaml
-apiVersion: k8s.kube-dc.com/v1alpha1
-kind: KdcCluster
-metadata:
-  name: my-cluster
+  name: worker-template
   namespace: default
 spec:
-  version: v1.34.0
-  
-  controlPlane:
-    replicas: 2
-  
-  dataStore:
-    dedicated: true
-    eipName: default-gw
-    port: 32380
-  
-  network:
-    serviceCIDR: 10.96.0.0/12
-    podCIDR: 10.220.0.0/16
-  
-  eip:
-    create: true
-    externalNetworkType: public
-  
-  enableClusterAPI: true
-  
-  workers:
-    - name: cloudsigma-workers
-      replicas: 3
-      infrastructureProvider: cloudsigma
-      cloudsigma:
-        cpu: 2000
-        memory: 4096
-        diskSize: 50
-        imageUUID: "your-image-uuid-here"
-        region: "zrh"
-        tags:
-          - kubernetes
-          - production
+  template:
+    spec:
+      cpu: 2000          # 2 GHz
+      memory: 4096       # 4 GB
+      diskUUID: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"
+      nics:
+        - ipv4Conf: dhcp  # Public NAT IP
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  name: worker-pool
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: my-cluster
+  template:
+    metadata:
       labels:
-        provider: cloudsigma
+        cluster.x-k8s.io/cluster-name: my-cluster
+    spec:
+      clusterName: my-cluster
+      version: v1.30.0
+      bootstrap:
+        dataSecretName: worker-bootstrap-data
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: CloudSigmaMachineTemplate
+        name: worker-template
 ```
 
 ```bash
-kubectl apply -f cluster-with-cloudsigma.yaml
+kubectl apply -f my-workers.yaml
 ```
 
-### Step 6: Monitor Cluster Creation
+### Step 6: Monitor Worker Provisioning
 
 ```bash
-# Watch cluster status
-kubectl get kdccluster my-cluster -w
+# Watch CloudSigma machines
+kubectl get cloudsigmamachines -A -w
 
-# Check CAPI resources
-kubectl get cluster,machinedeployment,machines
+# Check machine status
+kubectl describe cloudsigmamachine <machine-name>
 
-# Check CloudSigma machines
-kubectl get cloudsigmamachines
+# View provider logs
+kubectl logs -n capcs-system -l control-plane=controller-manager -f
 
-# View events
-kubectl get events --sort-by='.lastTimestamp'
+# Check events
+kubectl get events -A --sort-by='.lastTimestamp' | grep CloudSigma
 ```
 
-### Step 7: Access Tenant Cluster
+### Step 7: Verify Workers Joined
 
 ```bash
-# Get kubeconfig
-kubectl get secret my-cluster-cp-admin-kubeconfig \
-  -o jsonpath='{.data.admin\.conf}' | base64 -d > my-cluster-kubeconfig.yaml
-
-# Set kubeconfig
-export KUBECONFIG=my-cluster-kubeconfig.yaml
-
-# Verify nodes
+# Check nodes in your cluster
 kubectl get nodes
 
 # Expected output:
 # NAME                              STATUS   ROLES    AGE   VERSION
-# my-cluster-cloudsigma-workers-0   Ready    <none>   5m    v1.34.0
-# my-cluster-cloudsigma-workers-1   Ready    <none>   5m    v1.34.0
-# my-cluster-cloudsigma-workers-2   Ready    <none>   5m    v1.34.0
+# cloudsigma-worker-1               Ready    <none>   5m    v1.30.0
+# cloudsigma-worker-2               Ready    <none>   5m    v1.30.0
+
+# View machine details
+kubectl get cloudsigmamachines -o wide
+
+# Check CloudSigma VMs via API or web console
 ```
 
 ### Step 8: Deploy CloudSigma CCM (in Tenant Cluster)
@@ -261,6 +274,21 @@ kubectl top nodes
 
 ## Troubleshooting
 
+### Provider not starting
+
+```bash
+# Check pod status
+kubectl get pods -n capcs-system
+
+# View logs
+kubectl logs -n capcs-system deployment/cloudsigma-controller-manager
+
+# Common issues:
+# - Missing credentials secret
+# - RBAC permissions not applied
+# - Image pull errors
+```
+
 ### Workers not provisioning
 
 ```bash
@@ -268,10 +296,13 @@ kubectl top nodes
 kubectl describe cloudsigmamachine <name>
 
 # Check CAPCS provider logs
-kubectl logs -n capcs-system deployment/capcs-controller-manager
+kubectl logs -n capcs-system deployment/cloudsigma-controller-manager -f
 
 # Verify credentials
-kubectl get secret cloudsigma-credentials -n kube-system -o yaml
+kubectl get secret cloudsigma-credentials -n capcs-system -o yaml
+
+# Check CloudSigma API connectivity
+kubectl logs -n capcs-system -l control-plane=controller-manager | grep -i error
 ```
 
 ### Workers not joining cluster

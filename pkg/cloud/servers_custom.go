@@ -38,14 +38,14 @@ type CustomServerDrive struct {
 
 // CustomServerNIC represents a server NIC with string VLAN reference
 type CustomServerNIC struct {
-	VLAN         string                  `json:"vlan,omitempty"`          // UUID string
-	IPv4Conf     *CustomIPv4Conf         `json:"ip_v4_conf,omitempty"`    // IPv4 configuration (CloudSigma uses ip_v4_conf with underscores)
+	VLAN     string          `json:"vlan,omitempty"`       // UUID string
+	IPv4Conf *CustomIPv4Conf `json:"ip_v4_conf,omitempty"` // IPv4 configuration (CloudSigma uses ip_v4_conf with underscores)
 }
 
 // CustomIPv4Conf represents IPv4 configuration for a NIC
 type CustomIPv4Conf struct {
-	Conf string                  `json:"conf"`           // dhcp, static, or manual
-	IP   *CustomIPRef            `json:"ip,omitempty"`   // IP reference for static config
+	Conf string       `json:"conf"`         // dhcp, static, or manual
+	IP   *CustomIPRef `json:"ip,omitempty"` // IP reference for static config
 }
 
 // CustomIPRef represents an IP address reference
@@ -99,7 +99,7 @@ func (c *Client) createServerDirect(ctx context.Context, server *CustomServer) (
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
-	
+
 	// Add basic auth (same as SDK uses)
 	httpReq.SetBasicAuth(c.username, c.password)
 

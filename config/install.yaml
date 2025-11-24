@@ -1,0 +1,258 @@
+# Install CloudSigma Cluster API Provider
+#
+# This file contains all resources needed to deploy the provider to a management cluster.
+#
+# Prerequisites:
+#   1. Cluster API core components installed
+#   2. CloudSigma credentials secret created (see credentials-template.yaml)
+#
+# Installation:
+#   kubectl apply -f config/install.yaml
+#
+# Verify:
+#   kubectl get pods -n capcs-system
+#   kubectl logs -n capcs-system -l control-plane=controller-manager
+#
+---
+---
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: capcs-system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller
+---
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudsigma-controller-manager
+  namespace: capcs-system
+  labels:
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller
+---
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudsigma-controller-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - clusters
+  - clusters/status
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - machines
+  - machines/status
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - cloudsigmaclusters
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - cloudsigmaclusters/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - cloudsigmaclusters/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - cloudsigmamachines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - cloudsigmamachines/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - cloudsigmamachines/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudsigma-controller-manager-rolebinding
+  labels:
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudsigma-controller-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: cloudsigma-controller-manager
+    namespace: capcs-system
+---
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudsigma-controller-manager-metrics
+  namespace: capcs-system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller
+spec:
+  selector:
+    control-plane: controller-manager
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
+---
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudsigma-controller-manager
+  namespace: capcs-system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: cloudsigma-controller-manager
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: manager
+          image: shalb/cluster-api-provider-cloudsigma:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /manager
+          args:
+            - --leader-elect
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+          env:
+            - name: CLOUDSIGMA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsigma-credentials
+                  key: username
+            - name: CLOUDSIGMA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsigma-credentials
+                  key: password
+            - name: CLOUDSIGMA_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsigma-credentials
+                  key: region
+                  optional: true
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault

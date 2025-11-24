@@ -1,0 +1,84 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudsigma-controller-manager
+  namespace: capcs-system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: cloudsigma-controller-manager
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: manager
+          image: shalb/cluster-api-provider-cloudsigma:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /manager
+          args:
+            - --leader-elect
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+          env:
+            - name: CLOUDSIGMA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsigma-credentials
+                  key: username
+            - name: CLOUDSIGMA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsigma-credentials
+                  key: password
+            - name: CLOUDSIGMA_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsigma-credentials
+                  key: region
+                  optional: true
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault

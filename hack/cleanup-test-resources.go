@@ -44,7 +44,7 @@ func main() {
 
 	// Delete servers
 	for i, server := range testServers {
-		fmt.Printf("[%d/%d] Processing server: %s (UUID: %s, Status: %s)\n", 
+		fmt.Printf("[%d/%d] Processing server: %s (UUID: %s, Status: %s)\n",
 			i+1, len(testServers), server.Name, server.UUID, server.Status)
 
 		// Stop if running
@@ -100,8 +100,8 @@ func main() {
 
 	var orphanedDrives []cloudsigma.Drive
 	for _, drive := range drives {
-		if strings.Contains(drive.Name, "multi-pool-test-cloudsigma") && 
-		   len(drive.MountedOn) == 0 {
+		if strings.Contains(drive.Name, "multi-pool-test-cloudsigma") &&
+			len(drive.MountedOn) == 0 {
 			orphanedDrives = append(orphanedDrives, drive)
 		}
 	}
@@ -109,7 +109,7 @@ func main() {
 	if len(orphanedDrives) > 0 {
 		fmt.Printf("Found %d orphaned drives to delete\n\n", len(orphanedDrives))
 		for i, drive := range orphanedDrives {
-			fmt.Printf("[%d/%d] Deleting orphaned drive: %s (UUID: %s)\n", 
+			fmt.Printf("[%d/%d] Deleting orphaned drive: %s (UUID: %s)\n",
 				i+1, len(orphanedDrives), drive.Name, drive.UUID)
 			_, err := client.Drives.Delete(ctx, drive.UUID)
 			if err != nil {

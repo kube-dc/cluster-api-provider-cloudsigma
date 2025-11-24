@@ -1,0 +1,66 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+testbin/
+out/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+
+# Kubernetes Generated files (exclude from git, but needed for build)
+# **/zz_generated.* - REMOVED: These files are needed for the build!
+
+# editor and IDE paraphernalia
+.idea
+*.swp
+*.swo
+*~
+.vscode
+
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Examples
+examples/
+
+# Images
+images/
+
+# Hack scripts
+hack/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+release/
+*.tar.gz
+*.zip
+
+# Config (we need to copy these selectively)
+config/default/
+config/samples/

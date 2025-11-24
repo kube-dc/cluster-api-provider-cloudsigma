@@ -1,0 +1,16 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudsigma-controller-manager-rolebinding
+  labels:
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudsigma-controller-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: cloudsigma-controller-manager
+    namespace: capcs-system

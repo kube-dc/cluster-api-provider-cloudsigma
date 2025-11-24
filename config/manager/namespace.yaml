@@ -1,0 +1,9 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: capcs-system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: cluster-api-provider-cloudsigma
+    app.kubernetes.io/component: controller

@@ -135,14 +135,14 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 	var err error
 	if cloudSigmaMachine.Status.InstanceID != "" {
 		log.V(4).Info("Checking existing server", "instanceID", cloudSigmaMachine.Status.InstanceID)
-		
+
 		// Verify server still exists in CloudSigma
 		server, err = cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
 		if err != nil {
 			log.Error(err, "Failed to get server")
 			return ctrl.Result{}, errors.Wrap(err, "failed to get server")
 		}
-		
+
 		if server == nil {
 			// Server was deleted externally, clear status to trigger recreation
 			log.Info("Server no longer exists, will recreate", "instanceID", cloudSigmaMachine.Status.InstanceID)
@@ -268,7 +268,31 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 			// Server already deleted (externally or previously)
 			log.Info("Server not found in CloudSigma, assuming already deleted", "instanceID", cloudSigmaMachine.Status.InstanceID)
 		} else {
-			// Server exists, delete it
+			// Check if server is running and stop it first
+			// CloudSigma API requires servers to be stopped before deletion
+			if server.Status == "running" || server.Status == "starting" {
+				log.Info("Server is running, stopping before deletion",
+					"instanceID", cloudSigmaMachine.Status.InstanceID,
+					"status", server.Status)
+
+				if err := cloudClient.StopServer(ctx, cloudSigmaMachine.Status.InstanceID); err != nil {
+					log.Error(err, "Failed to stop server", "instanceID", cloudSigmaMachine.Status.InstanceID)
+					return ctrl.Result{}, errors.Wrap(err, "failed to stop server")
+				}
+
+				// Requeue to wait for server to reach stopped state
+				log.Info("Server stop initiated, requeuing to wait for stopped state", "instanceID", cloudSigmaMachine.Status.InstanceID)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+
+			// Server is stopped or stopping, safe to delete
+			if server.Status == "stopping" {
+				// Still stopping, wait a bit more
+				log.Info("Server is stopping, requeuing", "instanceID", cloudSigmaMachine.Status.InstanceID)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+
+			// Server is stopped, delete it
 			if err := cloudClient.DeleteServer(ctx, cloudSigmaMachine.Status.InstanceID); err != nil {
 				log.Error(err, "Failed to delete server", "instanceID", cloudSigmaMachine.Status.InstanceID)
 				return ctrl.Result{}, errors.Wrap(err, "failed to delete server")
