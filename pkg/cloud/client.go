@@ -26,9 +26,11 @@ import (
 
 // Client wraps the CloudSigma SDK client with CAPI-specific functionality
 type Client struct {
-	sdk      *cloudsigma.Client
-	region   string
-	username string
+	sdk         *cloudsigma.Client
+	region      string
+	username    string
+	password    string
+	apiEndpoint string
 }
 
 // NewClient creates a new CloudSigma client wrapper
@@ -46,10 +48,15 @@ func NewClient(username, password, region string) (*Client, error) {
 	cred := cloudsigma.NewUsernamePasswordCredentialsProvider(username, password)
 	sdk := cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
 
+	// Determine API endpoint based on region
+	apiEndpoint := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0", region)
+
 	return &Client{
-		sdk:      sdk,
-		region:   region,
-		username: username,
+		sdk:         sdk,
+		region:      region,
+		username:    username,
+		password:    password,
+		apiEndpoint: apiEndpoint,
 	}, nil
 }
 

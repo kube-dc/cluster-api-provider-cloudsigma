@@ -1,0 +1,75 @@
+---
+# CloudSigmaMachineTemplate for worker nodes (without VLAN - uses public NAT IP)
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: CloudSigmaMachineTemplate
+metadata:
+  name: multi-pool-test-cloudsigma
+  namespace: shalb-envoy
+spec:
+  template:
+    spec:
+      cpu: 2000          # 2 GHz
+      memory: 4096       # 4 GB
+      disks:
+        - uuid: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"  # Ubuntu 24.04 with Kubernetes 1.34.1 (v4 - FINAL with working Cepko bootstrap)
+          device: "virtio"
+          boot_order: 1
+          size: 10737418240  # 10 GB in bytes
+      # NICs omitted - CloudSigma will auto-assign public NAT IP
+      tags:
+        - kubernetes
+        - cloudsigma
+        - worker
+      meta:
+        cluster: "multi-pool-test"
+        provider: "cloudsigma"
+---
+# KubeadmConfigTemplate for bootstrap configuration
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+kind: KubeadmConfigTemplate
+metadata:
+  name: multi-pool-test-cloudsigma
+  namespace: shalb-envoy
+spec:
+  template:
+    spec:
+      joinConfiguration:
+        nodeRegistration:
+          name: "{{ ds.meta_data.local_hostname }}"
+          kubeletExtraArgs:
+            cloud-provider: external
+            provider-id: "cloudsigma://{{ ds.meta_data.instance_id }}"
+---
+# MachineDeployment for CloudSigma workers
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  name: multi-pool-test-cloudsigma
+  namespace: shalb-envoy
+  labels:
+    cluster.x-k8s.io/cluster-name: multi-pool-test
+spec:
+  clusterName: multi-pool-test
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: multi-pool-test
+      cluster.x-k8s.io/deployment-name: multi-pool-test-cloudsigma
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: multi-pool-test
+        cluster.x-k8s.io/deployment-name: multi-pool-test-cloudsigma
+        node-type: cloudsigma
+    spec:
+      clusterName: multi-pool-test
+      version: v1.34.0
+      bootstrap:
+        configRef:
+          apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+          kind: KubeadmConfigTemplate
+          name: multi-pool-test-cloudsigma
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: CloudSigmaMachineTemplate
+        name: multi-pool-test-cloudsigma

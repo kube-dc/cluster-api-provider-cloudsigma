@@ -38,8 +38,9 @@ type CloudSigmaMachineSpec struct {
 	Disks []CloudSigmaDisk `json:"disks"`
 
 	// NICs defines the network interface configuration
-	// +kubebuilder:validation:MinItems=1
-	NICs []CloudSigmaNIC `json:"nics"`
+	// When empty, CloudSigma will auto-assign a public NAT IP
+	// +optional
+	NICs []CloudSigmaNIC `json:"nics,omitempty"`
 
 	// Tags are metadata tags for the server
 	// +optional

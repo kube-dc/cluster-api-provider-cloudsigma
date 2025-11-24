@@ -1,0 +1,98 @@
+---
+# CloudSigma Cluster with Private VLAN
+# Workers deployed on a private VLAN with DHCP
+#
+# Prerequisites:
+#   - CloudSigma credentials configured
+#   - Base cluster with CAPI installed
+#   - cluster-api-provider-cloudsigma deployed
+#   - CloudSigma VLAN created (or use existing UUID)
+#
+# Usage:
+#   kubectl apply -f cloudsigma-cluster-with-vlan.yaml
+
+---
+# CloudSigmaMachineTemplate with VLAN networking
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: CloudSigmaMachineTemplate
+metadata:
+  name: cloudsigma-vlan-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      cpu: 4000          # 4 GHz CPU
+      memory: 8192       # 8 GB RAM
+      disks:
+        - uuid: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"  # Ubuntu 24.04 + K8s 1.34.1
+          device: "virtio"
+          boot_order: 1
+          size: 21474836480  # 20 GB
+      nics:
+        - vlan: "YOUR-VLAN-UUID-HERE"  # Replace with your VLAN UUID
+          ipv4_conf:
+            conf: "dhcp"
+      tags:
+        - kubernetes
+        - cloudsigma
+        - production
+      meta:
+        cluster: "cloudsigma-vlan-cluster"
+        provider: "cloudsigma"
+        environment: "production"
+
+---
+# KubeadmConfigTemplate for bootstrap configuration
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+kind: KubeadmConfigTemplate
+metadata:
+  name: cloudsigma-vlan-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      joinConfiguration:
+        nodeRegistration:
+          name: "{{ ds.meta_data.local_hostname }}"
+          kubeletExtraArgs:
+            cloud-provider: external
+            provider-id: "cloudsigma://{{ ds.meta_data.instance_id }}"
+          taints:
+            - key: node.cluster.x-k8s.io/uninitialized
+              effect: NoSchedule
+
+---
+# MachineDeployment for production workers
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  name: cloudsigma-vlan-workers
+  namespace: default
+  labels:
+    cluster.x-k8s.io/cluster-name: cloudsigma-vlan-cluster
+spec:
+  clusterName: cloudsigma-vlan-cluster
+  replicas: 3  # 3 production workers
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: cloudsigma-vlan-cluster
+      cluster.x-k8s.io/deployment-name: cloudsigma-vlan-workers
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: cloudsigma-vlan-cluster
+        cluster.x-k8s.io/deployment-name: cloudsigma-vlan-workers
+        node-type: cloudsigma-worker
+        workload-type: production
+    spec:
+      clusterName: cloudsigma-vlan-cluster
+      version: v1.34.0
+      bootstrap:
+        configRef:
+          apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+          kind: KubeadmConfigTemplate
+          name: cloudsigma-vlan-workers
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: CloudSigmaMachineTemplate
+        name: cloudsigma-vlan-workers

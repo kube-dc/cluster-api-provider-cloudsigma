@@ -1,0 +1,99 @@
+---
+# CloudSigma Test Cluster - Dedicated Testing
+# Pure CloudSigma worker deployment for testing the provider
+#
+# This creates a dedicated worker pool for the multi-pool-test cluster
+# with 2 CloudSigma workers for validation and testing
+#
+# Prerequisites:
+#   - multi-pool-test cluster exists
+#   - CloudSigma provider configured
+#   - Working image UUID: 4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79
+#
+# Usage:
+#   kubectl apply -f cloudsigma-test-cluster.yaml
+#
+# Cleanup:
+#   kubectl delete -f cloudsigma-test-cluster.yaml
+
+---
+# CloudSigmaMachineTemplate for test workers
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: CloudSigmaMachineTemplate
+metadata:
+  name: cloudsigma-test-workers
+  namespace: shalb-envoy
+spec:
+  template:
+    spec:
+      cpu: 2000          # 2 GHz CPU
+      memory: 4096       # 4 GB RAM
+      disks:
+        - uuid: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"  # v4 FINAL - Working bootstrap
+          device: "virtio"
+          boot_order: 1
+          size: 10737418240  # 10 GB
+      # No VLAN = auto-assign public NAT IP for easy testing
+      tags:
+        - kubernetes
+        - cloudsigma
+        - test-cluster
+        - auto-bootstrap-v4
+      meta:
+        cluster: "multi-pool-test"
+        provider: "cloudsigma"
+        test-deployment: "dedicated-cloudsigma-cluster"
+
+---
+# KubeadmConfigTemplate for bootstrap
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+kind: KubeadmConfigTemplate
+metadata:
+  name: cloudsigma-test-workers
+  namespace: shalb-envoy
+spec:
+  template:
+    spec:
+      joinConfiguration:
+        nodeRegistration:
+          name: "{{ ds.meta_data.local_hostname }}"
+          kubeletExtraArgs:
+            cloud-provider: external
+            provider-id: "cloudsigma://{{ ds.meta_data.instance_id }}"
+
+---
+# MachineDeployment - 2 test workers
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  name: cloudsigma-test-workers
+  namespace: shalb-envoy
+  labels:
+    cluster.x-k8s.io/cluster-name: multi-pool-test
+    test: dedicated-cloudsigma
+spec:
+  clusterName: multi-pool-test
+  replicas: 2  # 2 test workers
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: multi-pool-test
+      cluster.x-k8s.io/deployment-name: cloudsigma-test-workers
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: multi-pool-test
+        cluster.x-k8s.io/deployment-name: cloudsigma-test-workers
+        node-type: cloudsigma
+        test-cluster: dedicated
+    spec:
+      clusterName: multi-pool-test
+      version: v1.34.0
+      bootstrap:
+        configRef:
+          apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+          kind: KubeadmConfigTemplate
+          name: cloudsigma-test-workers
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: CloudSigmaMachineTemplate
+        name: cloudsigma-test-workers

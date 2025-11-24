@@ -107,7 +107,9 @@ spec:
                 description: Meta is custom metadata for the server
                 type: object
               nics:
-                description: NICs defines the network interface configuration
+                description: |-
+                  NICs defines the network interface configuration
+                  When empty, CloudSigma will auto-assign a public NAT IP
                 items:
                   description: CloudSigmaNIC defines a network interface configuration
                   properties:
@@ -141,7 +143,6 @@ spec:
                   - ipv4_conf
                   - vlan
                   type: object
-                minItems: 1
                 type: array
               providerID:
                 description: |-
@@ -157,7 +158,6 @@ spec:
             - cpu
             - disks
             - memory
-            - nics
             type: object
           status:
             description: CloudSigmaMachineStatus defines the observed state of CloudSigmaMachine

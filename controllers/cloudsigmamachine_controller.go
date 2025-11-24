@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -129,23 +130,27 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 		}
 	}
 
-	// Check if server already exists
+	// Check if server already exists (idempotency check)
+	var server *cloudsigma.Server
+	var err error
 	if cloudSigmaMachine.Status.InstanceID != "" {
-		log.V(4).Info("Server already exists", "instanceID", cloudSigmaMachine.Status.InstanceID)
-
-		// Get server status
-		server, err := cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
+		log.V(4).Info("Checking existing server", "instanceID", cloudSigmaMachine.Status.InstanceID)
+		
+		// Verify server still exists in CloudSigma
+		server, err = cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
 		if err != nil {
-			return ctrl.Result{}, errors.Wrap(err, "failed to get server status")
+			log.Error(err, "Failed to get server")
+			return ctrl.Result{}, errors.Wrap(err, "failed to get server")
 		}
-
+		
 		if server == nil {
-			log.Info("Server not found, will recreate", "instanceID", cloudSigmaMachine.Status.InstanceID)
+			// Server was deleted externally, clear status to trigger recreation
+			log.Info("Server no longer exists, will recreate", "instanceID", cloudSigmaMachine.Status.InstanceID)
 			cloudSigmaMachine.Status.InstanceID = ""
 			cloudSigmaMachine.Status.InstanceState = ""
-		} else {
-			// Update status
-			return r.updateStatus(ctx, cloudSigmaMachine, server)
+			if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
+				log.V(4).Info("Failed to clear status", "error", err)
+			}
 		}
 	}
 
@@ -172,7 +177,7 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 			BootstrapData: bootstrapData,
 		}
 
-		server, err := cloudClient.CreateServer(ctx, serverSpec)
+		server, err = cloudClient.CreateServer(ctx, serverSpec)
 		if err != nil {
 			log.Error(err, "Failed to create server")
 			conditions.MarkFalse(cloudSigmaMachine, infrav1.ServerReadyCondition, infrav1.ServerCreateFailedReason, clusterv1.ConditionSeverityError, err.Error())
@@ -181,16 +186,23 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 
 		log.Info("Server created successfully", "instanceID", server.UUID)
 
-		// Update status
+		// Update status first (this is critical to prevent duplicates)
 		cloudSigmaMachine.Status.InstanceID = server.UUID
 		cloudSigmaMachine.Status.InstanceState = server.Status
+		if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
+			// If status update fails, we might create duplicate servers on retry
+			// But at least we've recorded the server UUID in logs
+			log.Error(err, "Failed to update status with instance ID", "instanceID", server.UUID)
+			return ctrl.Result{}, errors.Wrap(err, "failed to update machine status")
+		}
 
-		// Set providerID
+		// Set providerID in spec (separate update)
 		providerID := fmt.Sprintf("cloudsigma://%s", server.UUID)
 		cloudSigmaMachine.Spec.ProviderID = &providerID
-
 		if err := r.Update(ctx, cloudSigmaMachine); err != nil {
-			return ctrl.Result{}, errors.Wrap(err, "failed to update machine with providerID")
+			// This is less critical - if it fails, we'll retry but won't create duplicates
+			log.Error(err, "Failed to update spec with providerID", "instanceID", server.UUID)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
 		// Start server if not running
@@ -203,6 +215,33 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 
 		// Requeue to check status
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Server exists, update its state
+	if server != nil {
+		cloudSigmaMachine.Status.InstanceState = server.Status
+		if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
+			log.V(4).Info("Failed to update instance state", "error", err)
+			// Don't fail on status update conflicts here
+		}
+
+		// Ensure server is running
+		if server.Status == "stopped" {
+			log.Info("Starting stopped server", "instanceID", server.UUID)
+			if err := cloudClient.StartServer(ctx, server.UUID); err != nil {
+				return ctrl.Result{}, errors.Wrap(err, "failed to start server")
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+
+		// Set ready condition
+		if server.Status == "running" {
+			conditions.MarkTrue(cloudSigmaMachine, infrav1.ServerReadyCondition)
+			cloudSigmaMachine.Status.Ready = true
+			if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
+				log.V(4).Info("Failed to update ready status", "error", err)
+			}
+		}
 	}
 
 	return ctrl.Result{}, nil
@@ -218,11 +257,26 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 	if cloudSigmaMachine.Status.InstanceID != "" {
 		log.Info("Deleting server", "instanceID", cloudSigmaMachine.Status.InstanceID)
 
-		if err := cloudClient.DeleteServer(ctx, cloudSigmaMachine.Status.InstanceID); err != nil {
-			return ctrl.Result{}, errors.Wrap(err, "failed to delete server")
+		// Check if server still exists in CloudSigma
+		server, err := cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
+		if err != nil {
+			log.Error(err, "Failed to get server for deletion", "instanceID", cloudSigmaMachine.Status.InstanceID)
+			return ctrl.Result{}, errors.Wrap(err, "failed to get server for deletion")
 		}
 
-		log.Info("Server deleted successfully", "instanceID", cloudSigmaMachine.Status.InstanceID)
+		if server == nil {
+			// Server already deleted (externally or previously)
+			log.Info("Server not found in CloudSigma, assuming already deleted", "instanceID", cloudSigmaMachine.Status.InstanceID)
+		} else {
+			// Server exists, delete it
+			if err := cloudClient.DeleteServer(ctx, cloudSigmaMachine.Status.InstanceID); err != nil {
+				log.Error(err, "Failed to delete server", "instanceID", cloudSigmaMachine.Status.InstanceID)
+				return ctrl.Result{}, errors.Wrap(err, "failed to delete server")
+			}
+			log.Info("Server deleted successfully", "instanceID", cloudSigmaMachine.Status.InstanceID)
+		}
+	} else {
+		log.Info("No instance ID set, nothing to delete")
 	}
 
 	// Remove finalizer
@@ -231,6 +285,7 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 		return ctrl.Result{}, errors.Wrap(err, "failed to remove finalizer")
 	}
 
+	log.Info("CloudSigmaMachine deletion completed")
 	return ctrl.Result{}, nil
 }
 
