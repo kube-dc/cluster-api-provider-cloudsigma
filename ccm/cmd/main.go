@@ -17,100 +17,91 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/klog/v2"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 
 	"github.com/kube-dc/cluster-api-provider-cloudsigma/ccm/controllers"
 )
 
-var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
-)
-
-func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(clusterv1.AddToScheme(scheme))
-}
-
 func main() {
 	var metricsAddr string
-	var enableLeaderElection bool
 	var probeAddr string
-	var watchNamespace string
+	var clusterName string
+	var kubeconfig string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. "+
-			"Enabling this will ensure there is only one active controller manager.")
-	flag.StringVar(&watchNamespace, "namespace", "",
-		"Namespace to watch for CAPI Cluster resources. If unspecified, watches all namespaces.")
+	flag.StringVar(&clusterName, "cluster-name", "", "Name of the cluster being managed.")
+	flag.StringVar(&kubeconfig, "tenant-kubeconfig", "", "Path to kubeconfig file for connecting to the tenant cluster.")
 
-	opts := zap.Options{
-		Development: true,
-	}
-	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-
-	// Create manager for management cluster (where CCM runs alongside CAPCS)
-	// This watches CAPI Cluster and Machine resources
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Metrics: metricsserver.Options{
-			BindAddress: metricsAddr,
-		},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "cloudsigma-ccm.cluster.x-k8s.io",
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
+	if kubeconfig == "" {
+		klog.Fatal("--tenant-kubeconfig is required")
 	}
 
-	klog.Infof("Setting up CloudSigma CCM (external mode)")
-	klog.Infof("Running in management cluster alongside CAPCS")
-	if watchNamespace != "" {
-		klog.Infof("Watching namespace: %s", watchNamespace)
-	} else {
-		klog.Infof("Watching all namespaces")
+	klog.Infof("Starting CloudSigma CCM for cluster: %s", clusterName)
+	klog.Infof("Using tenant kubeconfig: %s", kubeconfig)
+
+	// Create context that cancels on SIGTERM/SIGINT
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle shutdown signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		klog.Info("Received shutdown signal")
+		cancel()
+	}()
+
+	// Start health/ready probes
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+		})
+		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+		})
+		klog.Infof("Starting health probe server on %s", probeAddr)
+		if err := http.ListenAndServe(probeAddr, mux); err != nil && err != http.ErrServerClosed {
+			klog.Errorf("Health probe server error: %v", err)
+		}
+	}()
+
+	// Start metrics server (simple placeholder)
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		klog.Infof("Starting metrics server on %s", metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil && err != http.ErrServerClosed {
+			klog.Errorf("Metrics server error: %v", err)
+		}
+	}()
+
+	// Create and start node reconciler
+	reconciler := &controllers.NodeReconciler{
+		TenantKubeconfig: kubeconfig,
+		ClusterName:      clusterName,
 	}
 
-	if err = (&controllers.ClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Cluster")
-		os.Exit(1)
+	if err := reconciler.Start(ctx); err != nil {
+		klog.Fatalf("Failed to start node reconciler: %v", err)
 	}
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
-	}
-
-	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
-	}
+	// Wait for context cancellation
+	<-ctx.Done()
+	klog.Info("CloudSigma CCM shutting down")
 }

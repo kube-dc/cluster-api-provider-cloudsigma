@@ -61,8 +61,8 @@ spec:
       serviceAccountName: cloudsigma-ccm
       containers:
       - name: manager
-        image: docker.io/shalb/cloudsigma-ccm:latest
-        imagePullPolicy: IfNotPresent
+        image: docker.io/shalb/cloudsigma-ccm:v0.1.0
+        imagePullPolicy: Always
         command:
         - /ccm
         args:
