@@ -34,11 +34,17 @@ func main() {
 	var probeAddr string
 	var clusterName string
 	var kubeconfig string
+	var cloudsigmaUsername string
+	var cloudsigmaPassword string
+	var cloudsigmaRegion string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&clusterName, "cluster-name", "", "Name of the cluster being managed.")
 	flag.StringVar(&kubeconfig, "tenant-kubeconfig", "", "Path to kubeconfig file for connecting to the tenant cluster.")
+	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username")
+	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password")
+	flag.StringVar(&cloudsigmaRegion, "cloudsigma-region", os.Getenv("CLOUDSIGMA_REGION"), "CloudSigma region")
 
 	flag.Parse()
 
@@ -93,8 +99,11 @@ func main() {
 
 	// Create and start node reconciler
 	reconciler := &controllers.NodeReconciler{
-		TenantKubeconfig: kubeconfig,
-		ClusterName:      clusterName,
+		TenantKubeconfig:   kubeconfig,
+		ClusterName:        clusterName,
+		CloudSigmaUsername: cloudsigmaUsername,
+		CloudSigmaPassword: cloudsigmaPassword,
+		CloudSigmaRegion:   cloudsigmaRegion,
 	}
 
 	if err := reconciler.Start(ctx); err != nil {

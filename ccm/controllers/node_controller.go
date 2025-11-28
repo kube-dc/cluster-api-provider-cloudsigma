@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,8 +38,13 @@ type NodeReconciler struct {
 	TenantKubeconfig string
 	// ClusterName is the name of the cluster being managed
 	ClusterName string
+	// CloudSigma credentials
+	CloudSigmaUsername string
+	CloudSigmaPassword string
+	CloudSigmaRegion   string
 
-	tenantClient kubernetes.Interface
+	tenantClient    kubernetes.Interface
+	cloudsigmaClient *cloudsigma.Client
 }
 
 // Start initializes the tenant client and starts the node sync loop
@@ -56,6 +62,19 @@ func (r *NodeReconciler) Start(ctx context.Context) error {
 	}
 
 	klog.Infof("Connected to tenant cluster: %s", r.ClusterName)
+
+	// Create CloudSigma client if credentials are provided
+	if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
+		cred := cloudsigma.NewUsernamePasswordCredentialsProvider(r.CloudSigmaUsername, r.CloudSigmaPassword)
+		region := r.CloudSigmaRegion
+		if region == "" {
+			region = "zrh"
+		}
+		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
+		klog.Infof("CloudSigma client initialized for region: %s", region)
+	} else {
+		klog.Warning("CloudSigma credentials not provided, node addresses will not be updated")
+	}
 
 	// Start node sync loop
 	go r.syncLoop(ctx)
@@ -103,7 +122,7 @@ func (r *NodeReconciler) syncNodes(ctx context.Context) error {
 	return nil
 }
 
-// reconcileNode handles a single node - removes initialization taint
+// reconcileNode handles a single node - removes initialization taint and sets addresses
 func (r *NodeReconciler) reconcileNode(ctx context.Context, node *corev1.Node) error {
 	// Check if node has the cloud-provider initialization taint
 	hasTaint := false
@@ -116,34 +135,115 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, node *corev1.Node) e
 		newTaints = append(newTaints, taint)
 	}
 
-	if !hasTaint {
-		// Node already initialized
+	// Check if node needs address update
+	needsAddressUpdate := !r.hasIPAddress(node)
+
+	if !hasTaint && !needsAddressUpdate {
+		// Node already initialized and has addresses
 		return nil
 	}
 
-	klog.Infof("Initializing node %s", node.Name)
+	klog.Infof("Reconciling node %s (hasTaint=%v, needsAddressUpdate=%v)", node.Name, hasTaint, needsAddressUpdate)
+
+	nodeCopy := node.DeepCopy()
 
 	// Get node addresses from providerID (CloudSigma VM UUID)
-	// ProviderID format: cloudsigma://<uuid>
-	if node.Spec.ProviderID != "" {
+	if node.Spec.ProviderID != "" && r.cloudsigmaClient != nil && needsAddressUpdate {
 		vmUUID := strings.TrimPrefix(node.Spec.ProviderID, "cloudsigma://")
-		klog.V(2).Infof("Node %s has providerID: %s (VM UUID: %s)", node.Name, node.Spec.ProviderID, vmUUID)
-		// TODO: Query CloudSigma API for VM details if needed
-	}
+		klog.V(2).Infof("Fetching VM details for node %s (UUID: %s)", node.Name, vmUUID)
 
-	// Remove the initialization taint
-	nodeCopy := node.DeepCopy()
-	nodeCopy.Spec.Taints = newTaints
-
-	_, err := r.tenantClient.CoreV1().Nodes().Update(ctx, nodeCopy, metav1.UpdateOptions{})
-	if err != nil {
-		if errors.IsConflict(err) {
-			// Retry on conflict
-			return nil
+		addresses, err := r.getVMAddresses(ctx, vmUUID)
+		if err != nil {
+			klog.Errorf("Failed to get VM addresses for %s: %v", vmUUID, err)
+		} else if len(addresses) > 0 {
+			nodeCopy.Status.Addresses = addresses
+			klog.Infof("Setting addresses for node %s: %v", node.Name, addresses)
 		}
-		return fmt.Errorf("failed to update node: %w", err)
 	}
 
-	klog.Infof("Removed initialization taint from node %s", node.Name)
+	// Remove the initialization taint if present
+	if hasTaint {
+		nodeCopy.Spec.Taints = newTaints
+	}
+
+	// Update node spec (taints)
+	if hasTaint {
+		_, err := r.tenantClient.CoreV1().Nodes().Update(ctx, nodeCopy, metav1.UpdateOptions{})
+		if err != nil {
+			if errors.IsConflict(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to update node spec: %w", err)
+		}
+		klog.Infof("Removed initialization taint from node %s", node.Name)
+	}
+
+	// Update node status (addresses)
+	if needsAddressUpdate && len(nodeCopy.Status.Addresses) > 0 {
+		_, err := r.tenantClient.CoreV1().Nodes().UpdateStatus(ctx, nodeCopy, metav1.UpdateOptions{})
+		if err != nil {
+			if errors.IsConflict(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to update node status: %w", err)
+		}
+		klog.Infof("Updated addresses for node %s", node.Name)
+	}
+
 	return nil
+}
+
+// hasIPAddress checks if the node has an InternalIP or ExternalIP address
+func (r *NodeReconciler) hasIPAddress(node *corev1.Node) bool {
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP || addr.Type == corev1.NodeExternalIP {
+			return true
+		}
+	}
+	return false
+}
+
+// getVMAddresses queries CloudSigma API to get VM IP addresses
+func (r *NodeReconciler) getVMAddresses(ctx context.Context, vmUUID string) ([]corev1.NodeAddress, error) {
+	server, _, err := r.cloudsigmaClient.Servers.Get(ctx, vmUUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get server: %w", err)
+	}
+
+	var addresses []corev1.NodeAddress
+
+	// Add hostname
+	if server.Name != "" {
+		addresses = append(addresses, corev1.NodeAddress{
+			Type:    corev1.NodeHostName,
+			Address: server.Name,
+		})
+	}
+
+	// Get IP addresses by querying the IPs endpoint for IPs attached to this server
+	ips, _, err := r.cloudsigmaClient.IPs.List(ctx)
+	if err != nil {
+		klog.Errorf("Failed to list IPs: %v", err)
+	} else {
+		for _, ip := range ips {
+			// Check if this IP is attached to our server
+			if ip.Server != nil && ip.Server.UUID == vmUUID {
+				ipAddr := ip.UUID
+				if ipAddr != "" {
+					// Determine if internal or external based on IP range
+					addrType := corev1.NodeExternalIP
+					if strings.HasPrefix(ipAddr, "10.") || strings.HasPrefix(ipAddr, "192.168.") || strings.HasPrefix(ipAddr, "172.") {
+						addrType = corev1.NodeInternalIP
+					}
+					addresses = append(addresses, corev1.NodeAddress{
+						Type:    addrType,
+						Address: ipAddr,
+					})
+					klog.V(2).Infof("Found IP %s (type: %s) for VM %s", ipAddr, addrType, vmUUID)
+				}
+			}
+		}
+	}
+
+	return addresses, nil
 }
