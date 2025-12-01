@@ -244,21 +244,7 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	// Find the next available device channel
 	devChannel := findNextDeviceChannel(server.Drives)
 
-	// Stop the server if running (required for drive attachment)
-	wasRunning := server.Status == "running"
-	if wasRunning {
-		klog.Infof("Stopping server %s for drive attachment", req.NodeId)
-		_, _, err = d.cloudClient.Servers.Stop(ctx, req.NodeId)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to stop server: %v", err)
-		}
-		// Wait for server to stop
-		if err := d.waitForServerStatus(ctx, req.NodeId, "stopped"); err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to wait for server stop: %v", err)
-		}
-	}
-
-	// Add drive to server
+	// Add drive to server (CloudSigma supports hotplug for running VMs)
 	server.Drives = append(server.Drives, cloudsigma.ServerDrive{
 		BootOrder:  0,
 		DevChannel: devChannel,
@@ -268,20 +254,13 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 		},
 	})
 
-	// Update server
+	klog.Infof("Hotplugging volume %s to node %s at channel %s (server status: %s)", req.VolumeId, req.NodeId, devChannel, server.Status)
+
+	// Update server (hotplug - no stop/start required)
 	updateReq := &cloudsigma.ServerUpdateRequest{Server: server}
 	_, _, err = d.cloudClient.Servers.Update(ctx, req.NodeId, updateReq)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to attach volume: %v", err)
-	}
-
-	// Start server if it was running
-	if wasRunning {
-		klog.Infof("Starting server %s after drive attachment", req.NodeId)
-		_, _, err = d.cloudClient.Servers.Start(ctx, req.NodeId)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to start server: %v", err)
-		}
 	}
 
 	klog.Infof("Volume %s attached to node %s at channel %s", req.VolumeId, req.NodeId, devChannel)
@@ -335,34 +314,14 @@ func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
 
-	// Stop the server if running
-	wasRunning := server.Status == "running"
-	if wasRunning {
-		klog.Infof("Stopping server %s for drive detachment", req.NodeId)
-		_, _, err = d.cloudClient.Servers.Stop(ctx, req.NodeId)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to stop server: %v", err)
-		}
-		if err := d.waitForServerStatus(ctx, req.NodeId, "stopped"); err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to wait for server stop: %v", err)
-		}
-	}
+	klog.Infof("Hot-unplugging volume %s from node %s (server status: %s)", req.VolumeId, req.NodeId, server.Status)
 
-	// Update server with removed drive
+	// Update server with removed drive (hotplug - no stop/start required)
 	server.Drives = newDrives
 	updateReq := &cloudsigma.ServerUpdateRequest{Server: server}
 	_, _, err = d.cloudClient.Servers.Update(ctx, req.NodeId, updateReq)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to detach volume: %v", err)
-	}
-
-	// Start server if it was running
-	if wasRunning {
-		klog.Infof("Starting server %s after drive detachment", req.NodeId)
-		_, _, err = d.cloudClient.Servers.Start(ctx, req.NodeId)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to start server: %v", err)
-		}
 	}
 
 	klog.Infof("Volume %s detached from node %s", req.VolumeId, req.NodeId)
@@ -560,8 +519,9 @@ func findNextDeviceChannel(drives []cloudsigma.ServerDrive) string {
 }
 
 func getDevicePathFromChannel(channel string) string {
-	// Convert CloudSigma channel (e.g., "0:1") to Linux device path
-	// virtio devices appear as /dev/vda, /dev/vdb, etc.
+	// Convert CloudSigma channel (e.g., "0:2") to Linux device path
+	// CloudSigma maps channel 0:N directly to /dev/vd{N}
+	// Examples: 0:0→vda, 0:2→vdc, 0:3→vdd, 0:4→vde
 	parts := strings.Split(channel, ":")
 	if len(parts) != 2 {
 		return "/dev/vdb"
@@ -572,7 +532,7 @@ func getDevicePathFromChannel(channel string) string {
 		return "/dev/vdb"
 	}
 
-	// vda is typically boot, so we map channel index to letter
+	// Direct mapping: channel index to device letter
 	letter := byte('a' + idx)
 	return fmt.Sprintf("/dev/vd%c", letter)
 }
