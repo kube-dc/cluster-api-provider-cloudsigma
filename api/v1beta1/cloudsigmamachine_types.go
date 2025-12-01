@@ -14,6 +14,9 @@ const (
 
 	// ServerDeleteFailedReason used when server deletion fails
 	ServerDeleteFailedReason = "ServerDeleteFailed"
+
+	// ServerNotRunningReason used when server is not in running state
+	ServerNotRunningReason = "ServerNotRunning"
 )
 
 // CloudSigmaMachineSpec defines the desired state of CloudSigmaMachine
