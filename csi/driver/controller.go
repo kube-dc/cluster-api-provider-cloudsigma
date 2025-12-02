@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -409,7 +410,37 @@ func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 		return nil, status.Errorf(codes.Internal, "failed to detach volume: %v", err)
 	}
 
-	klog.Infof("Volume %s detached from node %s", req.VolumeId, req.NodeId)
+	// Verify detachment by polling the drive status
+	// CloudSigma detach is asynchronous - the API accepts the request but actual detachment takes time
+	klog.Infof("Verifying volume %s is detached from node %s", req.VolumeId, req.NodeId)
+	maxRetries := 30 // 30 seconds max
+	for i := 0; i < maxRetries; i++ {
+		drive, _, err := d.cloudClient.Drives.Get(ctx, req.VolumeId)
+		if err != nil {
+			if strings.Contains(err.Error(), "404") {
+				// Drive deleted, consider it detached
+				klog.Infof("Volume %s no longer exists, considered detached", req.VolumeId)
+				return &csi.ControllerUnpublishVolumeResponse{}, nil
+			}
+			klog.Warningf("Failed to verify detachment of volume %s (retry %d/%d): %v", req.VolumeId, i+1, maxRetries, err)
+		} else {
+			// Check if drive is unmounted
+			if drive.Status == "unmounted" && len(drive.MountedOn) == 0 {
+				klog.Infof("Volume %s successfully detached from node %s (verified)", req.VolumeId, req.NodeId)
+				return &csi.ControllerUnpublishVolumeResponse{}, nil
+			}
+			klog.V(4).Infof("Volume %s still mounted (status: %s, mounted_on: %d), waiting... (retry %d/%d)", 
+				req.VolumeId, drive.Status, len(drive.MountedOn), i+1, maxRetries)
+		}
+		
+		if i < maxRetries-1 {
+			time.Sleep(1 * time.Second)
+		}
+	}
+
+	// Timeout - log warning but don't fail as the detach API call succeeded
+	klog.Warningf("Timeout waiting for volume %s detachment verification from node %s after %d seconds (API call succeeded, assuming eventual consistency)", 
+		req.VolumeId, req.NodeId, maxRetries)
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
 
