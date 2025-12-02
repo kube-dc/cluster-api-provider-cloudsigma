@@ -1,11 +1,18 @@
 # CloudSigma Cluster API Provider - Deployment Status
 
-**Date:** November 24, 2025  
-**Status:** ✅ **WORKING - READY FOR PRODUCTION**
+**Date:** December 2, 2025
+**Status:** 🚀 **RELEASE v0.1.0**
 
 ---
 
 ## 🎉 Achievements
+
+### **✅ Release v0.1.0**
+- **First official release**
+- **Provider Version:** v0.1.0
+- **Docker Image:** `shalb/cluster-api-provider-cloudsigma:v0.1.0`
+- **Fully functional** for worker node provisioning
+
 
 ### **✅ Image Building**
 - **Working Image:** `4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79`

@@ -57,6 +57,11 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run cmd/main.go
 
+.PHONY: clean
+clean: ## Clean build artifacts
+	rm -rf bin/ cover.out dist/
+	go clean
+
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
 	@echo "Building image: ${IMG}"
