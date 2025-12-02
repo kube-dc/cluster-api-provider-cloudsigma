@@ -509,13 +509,21 @@ func (d *Driver) ControllerExpandVolume(ctx context.Context, req *csi.Controller
 
 	klog.Infof("Expanding volume %s to %d bytes", req.VolumeId, newSize)
 
+	// Get the drive to retrieve its name and media (required by CloudSigma API)
+	drive, _, err := d.cloudClient.Drives.Get(ctx, req.VolumeId)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "failed to get volume for resize: %v", err)
+	}
+
 	// Resize the drive
 	updateReq := &cloudsigma.DriveUpdateRequest{
 		Drive: &cloudsigma.Drive{
-			Size: int(newSize),
+			Name:  drive.Name,
+			Media: drive.Media,
+			Size:  int(newSize),
 		},
 	}
-	_, _, err := d.cloudClient.Drives.Resize(ctx, req.VolumeId, updateReq)
+	_, _, err = d.cloudClient.Drives.Resize(ctx, req.VolumeId, updateReq)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to expand volume: %v", err)
 	}
