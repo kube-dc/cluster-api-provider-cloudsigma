@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -69,6 +70,13 @@ type Driver struct {
 	controllerCaps []csi.ControllerServiceCapability_RPC_Type
 	nodeCaps       []csi.NodeServiceCapability_RPC_Type
 	volumeCaps     []csi.VolumeCapability_AccessMode_Mode
+
+	// Mutex for serializing volume attachment per server to prevent race conditions
+	serverAttachMu   sync.Mutex
+	serverAttachLocks map[string]*sync.Mutex
+	
+	// Mutex for serializing device discovery on node to prevent race conditions
+	nodeDeviceMu sync.Mutex
 }
 
 // Config holds the driver configuration
@@ -102,13 +110,14 @@ func NewDriver(cfg *Config) (*Driver, error) {
 	}
 
 	driver := &Driver{
-		name:        cfg.Name,
-		version:     cfg.Version,
-		nodeID:      cfg.NodeID,
-		region:      cfg.Region,
-		endpoint:    cfg.Endpoint,
-		mode:        cfg.Mode,
-		cloudClient: cloudClient,
+		name:              cfg.Name,
+		version:           cfg.Version,
+		nodeID:            cfg.NodeID,
+		region:            cfg.Region,
+		endpoint:          cfg.Endpoint,
+		mode:              cfg.Mode,
+		cloudClient:       cloudClient,
+		serverAttachLocks: make(map[string]*sync.Mutex),
 	}
 
 	// Set controller capabilities

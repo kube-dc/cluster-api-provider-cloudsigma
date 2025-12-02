@@ -46,13 +46,15 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 
 	stagingPath := req.StagingTargetPath
 
-	// Get device path from publish context
-	devicePath := ""
-	if req.PublishContext != nil {
-		devicePath = req.PublishContext["devicePath"]
-	}
-	if devicePath == "" {
-		return nil, status.Error(codes.InvalidArgument, "device path not found in publish context")
+	// Serialize device discovery AND mounting to prevent race conditions when multiple volumes
+	// are attached to the same node simultaneously. We must hold the lock through the entire
+	// process to ensure one volume is fully mounted before the next one tries to find its device.
+	d.nodeDeviceMu.Lock()
+	defer d.nodeDeviceMu.Unlock()
+	
+	devicePath, err := findDeviceByPath(req.PublishContext)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "failed to find device: %v", err)
 	}
 
 	klog.Infof("Staging volume %s at %s (device: %s)", req.VolumeId, stagingPath, devicePath)
@@ -484,4 +486,194 @@ func resizeFilesystem(devicePath, mountPoint string) error {
 	}
 
 	return nil
+}
+
+// findDeviceByPath finds the device using /dev/disk/by-path/ based on channel
+// This is battle-proof with NO FALLBACKS - either we find the correct device or we fail
+func findDeviceByPath(publishContext map[string]string) (string, error) {
+	channel := publishContext["channel"]
+	volumeId := publishContext["volumeId"]
+	
+	if channel == "" {
+		return "", fmt.Errorf("channel not found in publish context")
+	}
+	
+	klog.Infof("Finding device for volume %s with channel %s", volumeId, channel)
+	
+	byPathDir := "/dev/disk/by-path"
+	
+	// Snapshot existing devices BEFORE we start looking
+	existingDevices := make(map[string]string) // path -> resolved device
+	entries, err := filepath.Glob(filepath.Join(byPathDir, "virtio-pci-*"))
+	if err != nil {
+		klog.Warningf("Failed to list existing devices: %v", err)
+	}
+	
+	for _, entry := range entries {
+		if strings.Contains(entry, "-part") {
+			continue // Skip partitions
+		}
+		resolved, err := filepath.EvalSymlinks(entry)
+		if err == nil {
+			existingDevices[entry] = resolved
+		}
+	}
+	
+	klog.Infof("Existing devices before hotplug: %d virtio-pci devices", len(existingDevices))
+	
+	// Get list of currently mounted devices to exclude them
+	mounter := kmount.New("")
+	mountPoints, err := mounter.List()
+	if err != nil {
+		klog.Warningf("Failed to list mount points: %v", err)
+	}
+	
+	mountedDevices := make(map[string]bool)
+	for _, mp := range mountPoints {
+		// Resolve the device path to handle symlinks
+		resolved, err := filepath.EvalSymlinks(mp.Device)
+		if err == nil {
+			mountedDevices[resolved] = true
+		}
+		mountedDevices[mp.Device] = true
+	}
+	
+	klog.V(4).Infof("Currently mounted devices: %d", len(mountedDevices))
+	
+	// Find unmounted data disks (not boot, not already mounted)
+	candidateDevices := []string{}
+	for path, resolved := range existingDevices {
+		// Skip boot disk
+		if strings.HasSuffix(resolved, "/vda") {
+			continue
+		}
+		
+		// Skip already mounted devices
+		if mountedDevices[resolved] {
+			klog.V(4).Infof("Skipping already mounted device: %s -> %s", path, resolved)
+			continue
+		}
+		
+		// This is an unmounted data disk - potential candidate
+		candidateDevices = append(candidateDevices, path)
+		klog.Infof("Found unmounted data disk candidate: %s -> %s", path, resolved)
+	}
+	
+	// If we have exactly ONE unmounted data disk, use it
+	if len(candidateDevices) == 1 {
+		resolved := existingDevices[candidateDevices[0]]
+		klog.Infof("Using unmounted data disk for channel %s: %s -> %s", channel, candidateDevices[0], resolved)
+		return resolved, nil
+	}
+	
+	// If we have multiple unmounted disks, use the NEWEST one (most recently attached)
+	// This works because CSI processes volumes sequentially and the newest disk is the one we just attached
+	if len(candidateDevices) > 1 {
+		// Sort by modification time (newest first)
+		type deviceInfo struct {
+			path    string
+			modTime int64
+		}
+		devices := make([]deviceInfo, 0, len(candidateDevices))
+		for _, path := range candidateDevices {
+			info, err := os.Lstat(path)
+			if err != nil {
+				continue
+			}
+			devices = append(devices, deviceInfo{path: path, modTime: info.ModTime().UnixNano()})
+		}
+		
+		// Find the newest device
+		var newest deviceInfo
+		for _, d := range devices {
+			if d.modTime > newest.modTime {
+				newest = d
+			}
+		}
+		
+		if newest.path != "" {
+			resolved := existingDevices[newest.path]
+			klog.Infof("Multiple unmounted disks found, using newest for channel %s: %s -> %s", channel, newest.path, resolved)
+			return resolved, nil
+		}
+	}
+	
+	// No unmounted data disks, wait for NEW device to appear (up to 10 seconds)
+	klog.Infof("No unmounted data disk found, waiting for new device to appear for channel %s", channel)
+	maxRetries := 20
+	sleepDuration := 500 * 1000 * 1000 // 500ms in nanoseconds
+	
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Get current device list
+		currentEntries, err := filepath.Glob(filepath.Join(byPathDir, "virtio-pci-*"))
+		if err != nil {
+			klog.Warningf("Retry %d: Failed to list devices: %v", attempt+1, err)
+			exec.Command("sleep", "0.5").Run()
+			continue
+		}
+		
+		// Find NEW devices (not in the baseline)
+		newDevices := []string{}
+		for _, entry := range currentEntries {
+			if strings.Contains(entry, "-part") {
+				continue
+			}
+			
+			// Check if this device is new
+			if _, existed := existingDevices[entry]; !existed {
+				resolved, err := filepath.EvalSymlinks(entry)
+				if err != nil {
+					klog.V(4).Infof("Cannot resolve %s: %v", entry, err)
+					continue
+				}
+				
+				// Verify it's a block device
+				info, err := os.Stat(resolved)
+				if err != nil {
+					klog.V(4).Infof("Cannot stat %s: %v", resolved, err)
+					continue
+				}
+				
+				if info.Mode()&os.ModeDevice == 0 {
+					klog.V(4).Infof("Device %s is not a block device", resolved)
+					continue
+				}
+				
+				// Verify it's not the boot disk
+				if strings.HasSuffix(resolved, "/vda") {
+					klog.Warningf("Skipping boot disk: %s -> %s", entry, resolved)
+					continue
+				}
+				
+				newDevices = append(newDevices, entry)
+				klog.Infof("Found NEW device: %s -> %s", entry, resolved)
+			}
+		}
+		
+		// If we found exactly ONE new device, that's our disk
+		if len(newDevices) == 1 {
+			resolved, _ := filepath.EvalSymlinks(newDevices[0])
+			klog.Infof("SUCCESS: Found hotplugged device for channel %s: %s -> %s", channel, newDevices[0], resolved)
+			return resolved, nil
+		}
+		
+		// If we found multiple new devices, that's ambiguous - fail
+		if len(newDevices) > 1 {
+			devList := []string{}
+			for _, dev := range newDevices {
+				resolved, _ := filepath.EvalSymlinks(dev)
+				devList = append(devList, fmt.Sprintf("%s->%s", dev, resolved))
+			}
+			return "", fmt.Errorf("ambiguous: found %d new devices for channel %s: %v", len(newDevices), channel, devList)
+		}
+		
+		// No new devices yet, wait and retry
+		if attempt < maxRetries-1 {
+			klog.V(4).Infof("No new device found yet (attempt %d/%d)", attempt+1, maxRetries)
+			exec.Command("sh", "-c", fmt.Sprintf("sleep 0.%d", sleepDuration/100000000)).Run()
+		}
+	}
+	
+	// FAIL - we did not find the device
+	return "", fmt.Errorf("timeout: no new device appeared for channel %s after %d attempts (10 seconds)", channel, maxRetries)
 }

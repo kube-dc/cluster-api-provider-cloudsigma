@@ -19,8 +19,8 @@ package driver
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -193,7 +193,21 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
-// ControllerPublishVolume attaches a volume to a node (server)
+// getServerLock returns a mutex for the given server ID, creating one if it doesn't exist
+func (d *Driver) getServerLock(serverID string) *sync.Mutex {
+	d.serverAttachMu.Lock()
+	defer d.serverAttachMu.Unlock()
+
+	if lock, exists := d.serverAttachLocks[serverID]; exists {
+		return lock
+	}
+
+	lock := &sync.Mutex{}
+	d.serverAttachLocks[serverID] = lock
+	return lock
+}
+
+// ControllerPublishVolume attaches a volume to a node
 func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	if req.VolumeId == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume ID is required")
@@ -206,6 +220,11 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 		return nil, status.Error(codes.Internal, "CloudSigma client not initialized")
 	}
 
+	// Serialize attachment operations per server to prevent race conditions
+	serverLock := d.getServerLock(req.NodeId)
+	serverLock.Lock()
+	defer serverLock.Unlock()
+
 	klog.Infof("Attaching volume %s to node %s", req.VolumeId, req.NodeId)
 
 	// Get the server
@@ -217,10 +236,11 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	// Check if already attached
 	for _, sd := range server.Drives {
 		if sd.Drive != nil && sd.Drive.UUID == req.VolumeId {
-			klog.Infof("Volume %s already attached to node %s", req.VolumeId, req.NodeId)
+			klog.Infof("Volume %s already attached to node %s at channel %s", req.VolumeId, req.NodeId, sd.DevChannel)
 			return &csi.ControllerPublishVolumeResponse{
 				PublishContext: map[string]string{
-					"devicePath": getDevicePathFromChannel(sd.DevChannel),
+					"channel":  sd.DevChannel,
+					"volumeId": req.VolumeId,
 				},
 			}, nil
 		}
@@ -233,10 +253,44 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	}
 
 	// Check if drive is already mounted to another server
+	// If so, we need to detach it first to allow pod migration across nodes
 	if drive.Status == "mounted" && len(drive.MountedOn) > 0 {
 		for _, mount := range drive.MountedOn {
 			if mount.UUID != req.NodeId {
-				return nil, status.Errorf(codes.FailedPrecondition, "volume %s is already attached to another node %s", req.VolumeId, mount.UUID)
+				klog.Warningf("Volume %s is currently attached to node %s, will attempt to detach before attaching to node %s", 
+					req.VolumeId, mount.UUID, req.NodeId)
+				
+				// Try to detach from the old node
+				// This handles the case where a pod is rescheduled to a different node
+				// and the old volumeattachment hasn't been cleaned up yet
+				oldServer, _, getErr := d.cloudClient.Servers.Get(ctx, mount.UUID)
+				if getErr != nil {
+					if strings.Contains(getErr.Error(), "404") {
+						klog.Infof("Old node %s no longer exists, proceeding with attachment", mount.UUID)
+						// Old server is gone, we can proceed
+						break
+					}
+					return nil, status.Errorf(codes.Internal, "failed to get old node %s: %v", mount.UUID, getErr)
+				}
+				
+				// Remove the drive from the old server
+				newDrives := make([]cloudsigma.ServerDrive, 0, len(oldServer.Drives))
+				for _, sd := range oldServer.Drives {
+					if sd.Drive == nil || sd.Drive.UUID != req.VolumeId {
+						newDrives = append(newDrives, sd)
+					}
+				}
+				
+				oldServer.Drives = newDrives
+				updateReq := &cloudsigma.ServerUpdateRequest{Server: oldServer}
+				_, _, updateErr := d.cloudClient.Servers.Update(ctx, mount.UUID, updateReq)
+				if updateErr != nil {
+					klog.Warningf("Failed to detach volume %s from old node %s: %v (will proceed anyway)", 
+						req.VolumeId, mount.UUID, updateErr)
+				} else {
+					klog.Infof("Successfully detached volume %s from old node %s", req.VolumeId, mount.UUID)
+				}
+				break
 			}
 		}
 	}
@@ -267,7 +321,8 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 
 	return &csi.ControllerPublishVolumeResponse{
 		PublishContext: map[string]string{
-			"devicePath": getDevicePathFromChannel(devChannel),
+			"channel":  devChannel,     // Used by node to find device via /dev/disk/by-path/
+			"volumeId": req.VolumeId,   // For logging and verification
 		},
 	}, nil
 }
@@ -321,6 +376,36 @@ func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 	updateReq := &cloudsigma.ServerUpdateRequest{Server: server}
 	_, _, err = d.cloudClient.Servers.Update(ctx, req.NodeId, updateReq)
 	if err != nil {
+		// Log the error but don't fail - if the server API call fails,
+		// the volume might already be detached or the server might be deleted
+		klog.Warningf("Failed to detach volume %s from node %s via API (continuing anyway): %v", req.VolumeId, req.NodeId, err)
+		
+		// Verify if the volume is actually still attached by re-fetching the server
+		verifyServer, _, verifyErr := d.cloudClient.Servers.Get(ctx, req.NodeId)
+		if verifyErr != nil {
+			if strings.Contains(verifyErr.Error(), "404") {
+				klog.Infof("Node %s no longer exists, volume %s considered detached", req.NodeId, req.VolumeId)
+				return &csi.ControllerUnpublishVolumeResponse{}, nil
+			}
+			// Server exists but we can't verify - return the original error
+			return nil, status.Errorf(codes.Internal, "failed to detach volume: %v", err)
+		}
+		
+		// Check if volume is still attached after the failed update
+		stillAttached := false
+		for _, sd := range verifyServer.Drives {
+			if sd.Drive != nil && sd.Drive.UUID == req.VolumeId {
+				stillAttached = true
+				break
+			}
+		}
+		
+		if !stillAttached {
+			klog.Infof("Volume %s not attached to node %s after verification, considering detachment successful", req.VolumeId, req.NodeId)
+			return &csi.ControllerUnpublishVolumeResponse{}, nil
+		}
+		
+		// Volume is still attached, return error
 		return nil, status.Errorf(codes.Internal, "failed to detach volume: %v", err)
 	}
 
@@ -507,32 +592,27 @@ func findNextDeviceChannel(drives []cloudsigma.ServerDrive) string {
 		usedChannels[d.DevChannel] = true
 	}
 
-	// Try channels 0:1 through 0:15 (skip 0:0 which is usually boot drive)
-	for i := 1; i < 16; i++ {
-		channel := fmt.Sprintf("0:%d", i)
-		if !usedChannels[channel] {
-			return channel
+	// CloudSigma device channel allocation:
+	// - Unit 3 is always skipped on each controller
+	// - Controller 0: only unit 2 is available for data disks (0:0 is boot, 0:1 unused, 0:3 skipped)
+	// - Controller 1+: units 0,1,2 are available (unit 3 is skipped)
+	// This gives us: 0:2, then 1:0, 1:1, 1:2, then 2:0, 2:1, 2:2, etc.
+	
+	// Start with controller 0, unit 2 only
+	if !usedChannels["0:2"] {
+		return "0:2"
+	}
+	
+	// Then try controllers 1-202, units 0-2 only (skip unit 3)
+	for controller := 1; controller <= 202; controller++ {
+		for unit := 0; unit < 3; unit++ { // Only 0, 1, 2 - skip unit 3
+			channel := fmt.Sprintf("%d:%d", controller, unit)
+			if !usedChannels[channel] {
+				return channel
+			}
 		}
 	}
 
-	return "0:15" // Fallback
-}
-
-func getDevicePathFromChannel(channel string) string {
-	// Convert CloudSigma channel (e.g., "0:2") to Linux device path
-	// CloudSigma maps channel 0:N directly to /dev/vd{N}
-	// Examples: 0:0→vda, 0:2→vdc, 0:3→vdd, 0:4→vde
-	parts := strings.Split(channel, ":")
-	if len(parts) != 2 {
-		return "/dev/vdb"
-	}
-
-	idx, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return "/dev/vdb"
-	}
-
-	// Direct mapping: channel index to device letter
-	letter := byte('a' + idx)
-	return fmt.Sprintf("/dev/vd%c", letter)
+	// Fallback (should never reach here unless all slots are used!)
+	return "202:2" // Last available slot
 }
