@@ -67,16 +67,43 @@ echo "[$(date)] Swap disabled"
 # Step 2: Read metadata from CloudSigma using Cepko
 echo "[$(date)] Reading CloudSigma metadata via Cepko..."
 python3 << 'PYEOF'
-import sys, base64, yaml, subprocess, os, re
+import sys, base64, yaml, subprocess, os, re, time
 sys.path.insert(0, '/usr/lib/python3/dist-packages')
 
 from cloudinit.sources.helpers.cloudsigma import Cepko
 
 try:
-    # Read server context from CloudSigma
-    cepko = Cepko()
-    result = cepko.all()
-    server_context = result.result
+    # Read server context from CloudSigma with retry logic
+    max_retries = 5
+    retry_delay = 2
+    server_context = None
+    
+    for attempt in range(max_retries):
+        try:
+            cepko = Cepko()
+            result = cepko.all()
+            server_context = result.result
+            
+            # Validate that we got a dict, not an error string
+            if isinstance(server_context, dict):
+                print(f"[{subprocess.check_output(['date']).decode().strip()}] Metadata retrieved successfully on attempt {attempt + 1}")
+                break
+            else:
+                print(f"[{subprocess.check_output(['date']).decode().strip()}] Attempt {attempt + 1}: Got non-dict result: {type(server_context).__name__}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+        except Exception as e:
+            print(f"[{subprocess.check_output(['date']).decode().strip()}] Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2
+    
+    # Final validation
+    if not isinstance(server_context, dict):
+        print(f"[{subprocess.check_output(['date']).decode().strip()}] ERROR: Failed to get valid metadata after {max_retries} attempts")
+        print(f"[{subprocess.check_output(['date']).decode().strip()}] Result type: {type(server_context).__name__}, value: {server_context}")
+        sys.exit(1)
     
     # Get metadata
     meta = server_context.get('meta', {})
