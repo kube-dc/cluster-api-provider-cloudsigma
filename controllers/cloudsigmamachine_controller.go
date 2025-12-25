@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
@@ -332,10 +333,17 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 			// Delete the server if it still exists
 			if server != nil {
 				if err := cloudClient.DeleteServer(ctx, cloudSigmaMachine.Status.InstanceID); err != nil {
-					log.Error(err, "Failed to delete server", "instanceID", cloudSigmaMachine.Status.InstanceID)
-					return ctrl.Result{}, errors.Wrap(err, "failed to delete server")
+					// Check if server is already deleting or deleted - treat as success
+					errMsg := err.Error()
+					if strings.Contains(errMsg, "in state 'deleting'") || strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "404") {
+						log.Info("Server already deleting or deleted, proceeding to remove finalizer", "instanceID", cloudSigmaMachine.Status.InstanceID)
+					} else {
+						log.Error(err, "Failed to delete server", "instanceID", cloudSigmaMachine.Status.InstanceID)
+						return ctrl.Result{}, errors.Wrap(err, "failed to delete server")
+					}
+				} else {
+					log.Info("Server deleted successfully", "instanceID", cloudSigmaMachine.Status.InstanceID)
 				}
-				log.Info("Server deleted successfully", "instanceID", cloudSigmaMachine.Status.InstanceID)
 			}
 		}
 	} else {
