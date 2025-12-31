@@ -157,65 +157,84 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 
 	// Create server if it doesn't exist
 	if cloudSigmaMachine.Status.InstanceID == "" {
-		log.Info("Creating new CloudSigma server")
-
-		// Get bootstrap data
-		bootstrapData, err := r.getBootstrapData(ctx, machine)
+		// Check if server already exists by name (race condition protection)
+		existingServer, err := cloudClient.FindServerByName(ctx, cloudSigmaMachine.Name)
 		if err != nil {
-			log.Info("Bootstrap data not ready yet")
+			log.Error(err, "Failed to check for existing server by name")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 
-		// Create server
-		serverSpec := cloud.ServerSpec{
-			Name:          cloudSigmaMachine.Name,
-			CPU:           cloudSigmaMachine.Spec.CPU,
-			Memory:        cloudSigmaMachine.Spec.Memory,
-			Disks:         cloudSigmaMachine.Spec.Disks,
-			NICs:          cloudSigmaMachine.Spec.NICs,
-			Tags:          cloudSigmaMachine.Spec.Tags,
-			Meta:          cloudSigmaMachine.Spec.Meta,
-			BootstrapData: bootstrapData,
-		}
-
-		server, err = cloudClient.CreateServer(ctx, serverSpec)
-		if err != nil {
-			log.Error(err, "Failed to create server")
-			conditions.MarkFalse(cloudSigmaMachine, infrav1.ServerReadyCondition, infrav1.ServerCreateFailedReason, clusterv1.ConditionSeverityError, err.Error())
-			return ctrl.Result{}, errors.Wrap(err, "failed to create server")
-		}
-
-		log.Info("Server created successfully", "instanceID", server.UUID)
-
-		// Update status first (this is critical to prevent duplicates)
-		cloudSigmaMachine.Status.InstanceID = server.UUID
-		cloudSigmaMachine.Status.InstanceState = server.Status
-		if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
-			// If status update fails, we might create duplicate servers on retry
-			// But at least we've recorded the server UUID in logs
-			log.Error(err, "Failed to update status with instance ID", "instanceID", server.UUID)
-			return ctrl.Result{}, errors.Wrap(err, "failed to update machine status")
-		}
-
-		// Set providerID in spec (separate update)
-		providerID := fmt.Sprintf("cloudsigma://%s", server.UUID)
-		cloudSigmaMachine.Spec.ProviderID = &providerID
-		if err := r.Update(ctx, cloudSigmaMachine); err != nil {
-			// This is less critical - if it fails, we'll retry but won't create duplicates
-			log.Error(err, "Failed to update spec with providerID", "instanceID", server.UUID)
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		// Start server if not running
-		if server.Status != "running" {
-			log.Info("Starting server", "instanceID", server.UUID)
-			if err := cloudClient.StartServer(ctx, server.UUID); err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "failed to start server")
+		if existingServer != nil {
+			// Server already exists, update status and continue
+			log.Info("Found existing server by name, updating status", "instanceID", existingServer.UUID, "name", cloudSigmaMachine.Name)
+			cloudSigmaMachine.Status.InstanceID = existingServer.UUID
+			cloudSigmaMachine.Status.InstanceState = existingServer.Status
+			if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
+				log.Error(err, "Failed to update status with existing server", "instanceID", existingServer.UUID)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
-		}
+			server = existingServer
+		} else {
+			log.Info("Creating new CloudSigma server")
 
-		// Requeue to check status
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			// Get bootstrap data
+			bootstrapData, err := r.getBootstrapData(ctx, machine)
+			if err != nil {
+				log.Info("Bootstrap data not ready yet")
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+
+			// Create server
+			serverSpec := cloud.ServerSpec{
+				Name:          cloudSigmaMachine.Name,
+				CPU:           cloudSigmaMachine.Spec.CPU,
+				Memory:        cloudSigmaMachine.Spec.Memory,
+				Disks:         cloudSigmaMachine.Spec.Disks,
+				NICs:          cloudSigmaMachine.Spec.NICs,
+				Tags:          cloudSigmaMachine.Spec.Tags,
+				Meta:          cloudSigmaMachine.Spec.Meta,
+				BootstrapData: bootstrapData,
+			}
+
+			server, err = cloudClient.CreateServer(ctx, serverSpec)
+			if err != nil {
+				log.Error(err, "Failed to create server")
+				conditions.MarkFalse(cloudSigmaMachine, infrav1.ServerReadyCondition, infrav1.ServerCreateFailedReason, clusterv1.ConditionSeverityError, err.Error())
+				return ctrl.Result{}, errors.Wrap(err, "failed to create server")
+			}
+
+			log.Info("Server created successfully", "instanceID", server.UUID)
+
+			// Update status first (this is critical to prevent duplicates)
+			cloudSigmaMachine.Status.InstanceID = server.UUID
+			cloudSigmaMachine.Status.InstanceState = server.Status
+			if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
+				// If status update fails, we might create duplicate servers on retry
+				// But at least we've recorded the server UUID in logs
+				log.Error(err, "Failed to update status with instance ID", "instanceID", server.UUID)
+				return ctrl.Result{}, errors.Wrap(err, "failed to update machine status")
+			}
+
+			// Set providerID in spec (separate update)
+			providerID := fmt.Sprintf("cloudsigma://%s", server.UUID)
+			cloudSigmaMachine.Spec.ProviderID = &providerID
+			if err := r.Update(ctx, cloudSigmaMachine); err != nil {
+				// This is less critical - if it fails, we'll retry but won't create duplicates
+				log.Error(err, "Failed to update spec with providerID", "instanceID", server.UUID)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+
+			// Start server if not running
+			if server.Status != "running" {
+				log.Info("Starting server", "instanceID", server.UUID)
+				if err := cloudClient.StartServer(ctx, server.UUID); err != nil {
+					return ctrl.Result{}, errors.Wrap(err, "failed to start server")
+				}
+			}
+
+			// Requeue to check status
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
 	}
 
 	// Server exists, update its state

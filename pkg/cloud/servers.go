@@ -401,3 +401,23 @@ func (c *Client) ListServers(ctx context.Context) ([]cloudsigma.Server, error) {
 	klog.V(4).Infof("Found %d servers", len(servers))
 	return servers, nil
 }
+
+// FindServerByName finds a server by name, returns nil if not found
+func (c *Client) FindServerByName(ctx context.Context, name string) (*cloudsigma.Server, error) {
+	klog.V(4).Infof("Finding server by name: %s", name)
+
+	servers, _, err := c.sdk.Servers.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list servers: %w", err)
+	}
+
+	for _, server := range servers {
+		if server.Name == name {
+			klog.V(4).Infof("Found server %s with UUID %s", name, server.UUID)
+			return &server, nil
+		}
+	}
+
+	klog.V(4).Infof("Server %s not found", name)
+	return nil, nil
+}
