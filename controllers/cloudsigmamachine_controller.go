@@ -157,16 +157,20 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 
 	// Create server if it doesn't exist
 	if cloudSigmaMachine.Status.InstanceID == "" {
-		// Check if server already exists by name (race condition protection)
-		existingServer, err := cloudClient.FindServerByName(ctx, cloudSigmaMachine.Name)
+		// Get machine UID for metadata-based identification
+		machineUID := string(cloudSigmaMachine.UID)
+		log.Info("Checking for existing server", "name", cloudSigmaMachine.Name, "machineUID", machineUID)
+
+		// Check if server already exists by name or metadata (race condition protection)
+		existingServer, err := cloudClient.FindServerByNameOrMeta(ctx, cloudSigmaMachine.Name, machineUID)
 		if err != nil {
-			log.Error(err, "Failed to check for existing server by name")
+			log.Error(err, "Failed to check for existing server")
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 
 		if existingServer != nil {
 			// Server already exists, update status and continue
-			log.Info("Found existing server by name, updating status", "instanceID", existingServer.UUID, "name", cloudSigmaMachine.Name)
+			log.Info("Found existing server, updating status", "instanceID", existingServer.UUID, "name", cloudSigmaMachine.Name)
 			cloudSigmaMachine.Status.InstanceID = existingServer.UUID
 			cloudSigmaMachine.Status.InstanceState = existingServer.Status
 			if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
@@ -175,7 +179,7 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 			}
 			server = existingServer
 		} else {
-			log.Info("Creating new CloudSigma server")
+			log.Info("No existing server found, creating new CloudSigma server", "name", cloudSigmaMachine.Name, "machineUID", machineUID)
 
 			// Get bootstrap data
 			bootstrapData, err := r.getBootstrapData(ctx, machine)
@@ -184,7 +188,17 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 
-			// Create server
+			// Create server with machine-uid in metadata for identification
+			meta := make(map[string]string)
+			// Copy existing metadata
+			for k, v := range cloudSigmaMachine.Spec.Meta {
+				meta[k] = v
+			}
+			// Add machine-uid for duplicate detection
+			meta["machine-uid"] = machineUID
+			meta["cluster"] = cloudSigmaMachine.Labels["cluster.x-k8s.io/cluster-name"]
+			meta["pool"] = cloudSigmaMachine.Labels["cluster.x-k8s.io/deployment-name"]
+
 			serverSpec := cloud.ServerSpec{
 				Name:          cloudSigmaMachine.Name,
 				CPU:           cloudSigmaMachine.Spec.CPU,
@@ -192,7 +206,7 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 				Disks:         cloudSigmaMachine.Spec.Disks,
 				NICs:          cloudSigmaMachine.Spec.NICs,
 				Tags:          cloudSigmaMachine.Spec.Tags,
-				Meta:          cloudSigmaMachine.Spec.Meta,
+				Meta:          meta,
 				BootstrapData: bootstrapData,
 			}
 

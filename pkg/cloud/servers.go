@@ -402,22 +402,43 @@ func (c *Client) ListServers(ctx context.Context) ([]cloudsigma.Server, error) {
 	return servers, nil
 }
 
-// FindServerByName finds a server by name, returns nil if not found
-func (c *Client) FindServerByName(ctx context.Context, name string) (*cloudsigma.Server, error) {
-	klog.V(4).Infof("Finding server by name: %s", name)
+// FindServerByNameOrMeta finds a server by name or metadata machine-uid, returns nil if not found
+// It checks metadata first (more reliable for identifying our servers) then falls back to name
+func (c *Client) FindServerByNameOrMeta(ctx context.Context, name string, machineUID string) (*cloudsigma.Server, error) {
+	klog.Infof("Finding server by name=%s or machineUID=%s", name, machineUID)
 
 	servers, _, err := c.sdk.Servers.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list servers: %w", err)
 	}
 
+	klog.Infof("Listed %d servers, searching for match...", len(servers))
+
+	// First, check by metadata (machine UID) - this is most reliable
+	if machineUID != "" {
+		for _, server := range servers {
+			if server.Meta != nil {
+				if uid, ok := server.Meta["machine-uid"]; ok && uid == machineUID {
+					klog.Infof("Found server by machineUID: name=%s, uuid=%s, machineUID=%s", server.Name, server.UUID, machineUID)
+					return &server, nil
+				}
+			}
+		}
+	}
+
+	// Fallback: check by name
 	for _, server := range servers {
 		if server.Name == name {
-			klog.V(4).Infof("Found server %s with UUID %s", name, server.UUID)
+			klog.Infof("Found server by name: name=%s, uuid=%s", server.Name, server.UUID)
 			return &server, nil
 		}
 	}
 
-	klog.V(4).Infof("Server %s not found", name)
+	klog.Infof("No server found matching name=%s or machineUID=%s", name, machineUID)
 	return nil, nil
+}
+
+// FindServerByName finds a server by name, returns nil if not found (legacy, prefer FindServerByNameOrMeta)
+func (c *Client) FindServerByName(ctx context.Context, name string) (*cloudsigma.Server, error) {
+	return c.FindServerByNameOrMeta(ctx, name, "")
 }
