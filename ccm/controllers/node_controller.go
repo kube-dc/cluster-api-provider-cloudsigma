@@ -43,7 +43,7 @@ type NodeReconciler struct {
 	CloudSigmaPassword string
 	CloudSigmaRegion   string
 
-	tenantClient    kubernetes.Interface
+	tenantClient     kubernetes.Interface
 	cloudsigmaClient *cloudsigma.Client
 }
 

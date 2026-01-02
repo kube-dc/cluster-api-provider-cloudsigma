@@ -258,9 +258,9 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	if drive.Status == "mounted" && len(drive.MountedOn) > 0 {
 		for _, mount := range drive.MountedOn {
 			if mount.UUID != req.NodeId {
-				klog.Warningf("Volume %s is currently attached to node %s, will attempt to detach before attaching to node %s", 
+				klog.Warningf("Volume %s is currently attached to node %s, will attempt to detach before attaching to node %s",
 					req.VolumeId, mount.UUID, req.NodeId)
-				
+
 				// Try to detach from the old node
 				// This handles the case where a pod is rescheduled to a different node
 				// and the old volumeattachment hasn't been cleaned up yet
@@ -273,7 +273,7 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 					}
 					return nil, status.Errorf(codes.Internal, "failed to get old node %s: %v", mount.UUID, getErr)
 				}
-				
+
 				// Remove the drive from the old server
 				newDrives := make([]cloudsigma.ServerDrive, 0, len(oldServer.Drives))
 				for _, sd := range oldServer.Drives {
@@ -281,12 +281,12 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 						newDrives = append(newDrives, sd)
 					}
 				}
-				
+
 				oldServer.Drives = newDrives
 				updateReq := &cloudsigma.ServerUpdateRequest{Server: oldServer}
 				_, _, updateErr := d.cloudClient.Servers.Update(ctx, mount.UUID, updateReq)
 				if updateErr != nil {
-					klog.Warningf("Failed to detach volume %s from old node %s: %v (will proceed anyway)", 
+					klog.Warningf("Failed to detach volume %s from old node %s: %v (will proceed anyway)",
 						req.VolumeId, mount.UUID, updateErr)
 				} else {
 					klog.Infof("Successfully detached volume %s from old node %s", req.VolumeId, mount.UUID)
@@ -322,8 +322,8 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 
 	return &csi.ControllerPublishVolumeResponse{
 		PublishContext: map[string]string{
-			"channel":  devChannel,     // Used by node to find device via /dev/disk/by-path/
-			"volumeId": req.VolumeId,   // For logging and verification
+			"channel":  devChannel,   // Used by node to find device via /dev/disk/by-path/
+			"volumeId": req.VolumeId, // For logging and verification
 		},
 	}, nil
 }
@@ -380,7 +380,7 @@ func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 		// Log the error but don't fail - if the server API call fails,
 		// the volume might already be detached or the server might be deleted
 		klog.Warningf("Failed to detach volume %s from node %s via API (continuing anyway): %v", req.VolumeId, req.NodeId, err)
-		
+
 		// Verify if the volume is actually still attached by re-fetching the server
 		verifyServer, _, verifyErr := d.cloudClient.Servers.Get(ctx, req.NodeId)
 		if verifyErr != nil {
@@ -391,7 +391,7 @@ func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 			// Server exists but we can't verify - return the original error
 			return nil, status.Errorf(codes.Internal, "failed to detach volume: %v", err)
 		}
-		
+
 		// Check if volume is still attached after the failed update
 		stillAttached := false
 		for _, sd := range verifyServer.Drives {
@@ -400,12 +400,12 @@ func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 				break
 			}
 		}
-		
+
 		if !stillAttached {
 			klog.Infof("Volume %s not attached to node %s after verification, considering detachment successful", req.VolumeId, req.NodeId)
 			return &csi.ControllerUnpublishVolumeResponse{}, nil
 		}
-		
+
 		// Volume is still attached, return error
 		return nil, status.Errorf(codes.Internal, "failed to detach volume: %v", err)
 	}
@@ -429,17 +429,17 @@ func (d *Driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 				klog.Infof("Volume %s successfully detached from node %s (verified)", req.VolumeId, req.NodeId)
 				return &csi.ControllerUnpublishVolumeResponse{}, nil
 			}
-			klog.V(4).Infof("Volume %s still mounted (status: %s, mounted_on: %d), waiting... (retry %d/%d)", 
+			klog.V(4).Infof("Volume %s still mounted (status: %s, mounted_on: %d), waiting... (retry %d/%d)",
 				req.VolumeId, drive.Status, len(drive.MountedOn), i+1, maxRetries)
 		}
-		
+
 		if i < maxRetries-1 {
 			time.Sleep(1 * time.Second)
 		}
 	}
 
 	// Timeout - log warning but don't fail as the detach API call succeeded
-	klog.Warningf("Timeout waiting for volume %s detachment verification from node %s after %d seconds (API call succeeded, assuming eventual consistency)", 
+	klog.Warningf("Timeout waiting for volume %s detachment verification from node %s after %d seconds (API call succeeded, assuming eventual consistency)",
 		req.VolumeId, req.NodeId, maxRetries)
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
@@ -636,12 +636,12 @@ func findNextDeviceChannel(drives []cloudsigma.ServerDrive) string {
 	// - Controller 0: only unit 2 is available for data disks (0:0 is boot, 0:1 unused, 0:3 skipped)
 	// - Controller 1+: units 0,1,2 are available (unit 3 is skipped)
 	// This gives us: 0:2, then 1:0, 1:1, 1:2, then 2:0, 2:1, 2:2, etc.
-	
+
 	// Start with controller 0, unit 2 only
 	if !usedChannels["0:2"] {
 		return "0:2"
 	}
-	
+
 	// Then try controllers 1-202, units 0-2 only (skip unit 3)
 	for controller := 1; controller <= 202; controller++ {
 		for unit := 0; unit < 3; unit++ { // Only 0, 1, 2 - skip unit 3

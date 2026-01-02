@@ -50,7 +50,7 @@
 
 ## Final Image Details
 
-**Current Image UUID:** `4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79`
+**Current Image UUID:** `569991f2-c96f-443c-88dd-72d1e53bf090`
 
 **Included:**
 - Ubuntu 24.04.2 LTS

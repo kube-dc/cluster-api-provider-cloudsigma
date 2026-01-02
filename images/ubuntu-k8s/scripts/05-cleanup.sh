@@ -187,10 +187,17 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Add delay to ensure CloudSigma metadata server is ready
+ExecStartPre=/bin/sleep 10
 ExecStart=/usr/local/bin/cloudsigma-bootstrap.sh
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
+# Restart on failure to handle race conditions
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

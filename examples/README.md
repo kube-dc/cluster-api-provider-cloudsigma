@@ -11,7 +11,7 @@ This directory contains example configurations for deploying Kubernetes clusters
 
 ## Current Working Image
 
-**UUID:** `4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79`
+**UUID:** `569991f2-c96f-443c-88dd-72d1e53bf090`
 
 **Specifications:**
 - OS: Ubuntu 24.04.2 LTS

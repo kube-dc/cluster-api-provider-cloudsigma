@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/cluster-api/util/predicates"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	infrav1 "github.com/kube-dc/cluster-api-provider-cloudsigma/api/v1beta1"
@@ -177,6 +178,13 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 				log.Error(err, "Failed to update status with existing server", "instanceID", existingServer.UUID)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
+			// Also set providerID in spec (required for Machine to transition to Running)
+			providerID := fmt.Sprintf("cloudsigma://%s", existingServer.UUID)
+			cloudSigmaMachine.Spec.ProviderID = &providerID
+			if err := r.Update(ctx, cloudSigmaMachine); err != nil {
+				log.Error(err, "Failed to update spec with providerID for existing server", "instanceID", existingServer.UUID)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
 			server = existingServer
 		} else {
 			log.Info("No existing server found, creating new CloudSigma server", "name", cloudSigmaMachine.Name, "machineUID", machineUID)
@@ -223,10 +231,11 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 			cloudSigmaMachine.Status.InstanceID = server.UUID
 			cloudSigmaMachine.Status.InstanceState = server.Status
 			if err := r.Status().Update(ctx, cloudSigmaMachine); err != nil {
-				// If status update fails, we might create duplicate servers on retry
-				// But at least we've recorded the server UUID in logs
-				log.Error(err, "Failed to update status with instance ID", "instanceID", server.UUID)
-				return ctrl.Result{}, errors.Wrap(err, "failed to update machine status")
+				// If status update fails due to conflict, DON'T return error immediately
+				// Delay requeue to give CloudSigma API time to propagate the server
+				// so FindServerByNameOrMeta can find it on next reconcile
+				log.Error(err, "Failed to update status with instance ID, will retry after delay", "instanceID", server.UUID)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 
 			// Set providerID in spec (separate update)
@@ -254,6 +263,17 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 	// Server exists, update its state
 	if server != nil {
 		cloudSigmaMachine.Status.InstanceState = server.Status
+
+		// Ensure providerID is set in spec (required for Machine to transition to Running)
+		if cloudSigmaMachine.Spec.ProviderID == nil || *cloudSigmaMachine.Spec.ProviderID == "" {
+			providerID := fmt.Sprintf("cloudsigma://%s", server.UUID)
+			cloudSigmaMachine.Spec.ProviderID = &providerID
+			if err := r.Update(ctx, cloudSigmaMachine); err != nil {
+				log.Error(err, "Failed to set providerID in spec", "instanceID", server.UUID)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			log.Info("Set providerID in spec", "instanceID", server.UUID, "providerID", providerID)
+		}
 
 		// Extract and populate network addresses from CloudSigma API
 		addresses, err := cloudClient.GetServerAddressesWithClient(ctx, server)
@@ -346,7 +366,9 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 			}
 
 			// Wait for server to stop (poll inline instead of requeue)
-			for i := 0; i < 30; i++ { // Max 5 minutes (30 * 10s)
+			// Max 2 minutes (12 * 10s) - after that, force delete anyway
+			stoppedOrTimeout := false
+			for i := 0; i < 12; i++ {
 				server, err = cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
 				if err != nil {
 					log.Error(err, "Failed to get server status during deletion", "instanceID", cloudSigmaMachine.Status.InstanceID)
@@ -354,22 +376,34 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 				}
 				if server == nil {
 					log.Info("Server no longer exists", "instanceID", cloudSigmaMachine.Status.InstanceID)
+					stoppedOrTimeout = true
 					break
 				}
 				if server.Status == "stopped" {
+					stoppedOrTimeout = true
 					break
 				}
 				log.Info("Waiting for server to stop", "instanceID", cloudSigmaMachine.Status.InstanceID, "status", server.Status)
 				time.Sleep(10 * time.Second)
 			}
 
+			// If still not stopped after timeout, log warning and try force delete anyway
+			if !stoppedOrTimeout && server != nil {
+				log.Info("Server stuck in stopping state, attempting force delete after timeout",
+					"instanceID", cloudSigmaMachine.Status.InstanceID,
+					"status", server.Status)
+			}
+
 			// Delete the server if it still exists
 			if server != nil {
 				if err := cloudClient.DeleteServer(ctx, cloudSigmaMachine.Status.InstanceID); err != nil {
-					// Check if server is already deleting or deleted - treat as success
+					// Check if server is already deleting or deleted or stopping - treat as success
 					errMsg := err.Error()
-					if strings.Contains(errMsg, "in state 'deleting'") || strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "404") {
-						log.Info("Server already deleting or deleted, proceeding to remove finalizer", "instanceID", cloudSigmaMachine.Status.InstanceID)
+					if strings.Contains(errMsg, "in state 'deleting'") ||
+						strings.Contains(errMsg, "in state 'stopping'") ||
+						strings.Contains(errMsg, "not found") ||
+						strings.Contains(errMsg, "404") {
+						log.Info("Server already deleting/stopping or deleted, proceeding to remove finalizer", "instanceID", cloudSigmaMachine.Status.InstanceID)
 					} else {
 						log.Error(err, "Failed to delete server", "instanceID", cloudSigmaMachine.Status.InstanceID)
 						return ctrl.Result{}, errors.Wrap(err, "failed to delete server")
@@ -434,5 +468,8 @@ func (r *CloudSigmaMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1.CloudSigmaMachine{}).
 		WithEventFilter(predicates.ResourceNotPaused(ctrl.LoggerFrom(context.Background()))).
+		// Limit to 1 concurrent reconcile to prevent duplicate VM creation
+		// due to race conditions with CloudSigma API eventual consistency
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }

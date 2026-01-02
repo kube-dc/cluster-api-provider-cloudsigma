@@ -43,7 +43,7 @@ spec:
         cpu: 2000
         memory: 4096
         diskSize: 10  # GB
-        imageUUID: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"
+        imageUUID: "569991f2-c96f-443c-88dd-72d1e53bf090"
         region: "next"
       labels:
         node-type: cloudsigma
@@ -66,7 +66,7 @@ spec:
         - boot_order: 1
           device: virtio
           size: 10737418240  # 10GB in bytes
-          uuid: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"
+          uuid: "569991f2-c96f-443c-88dd-72d1e53bf090"
       meta:
         cluster: multi-pool-test
         provider: cloudsigma
@@ -157,7 +157,7 @@ spec:
     - boot_order: 1
       device: virtio
       size: 10737418240
-      uuid: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"
+      uuid: "569991f2-c96f-443c-88dd-72d1e53bf090"
   meta:
     cluster: multi-pool-test
     provider: cloudsigma
@@ -183,7 +183,7 @@ CloudSigma API shows:
 - State: `running`
 - CPU: 2000 MHz
 - Memory: 4096 MB
-- Disk: Cloned from `4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79`
+- Disk: Cloned from `569991f2-c96f-443c-88dd-72d1e53bf090`
 
 ## Key Field Mappings
 

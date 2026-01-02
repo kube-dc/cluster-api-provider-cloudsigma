@@ -72,9 +72,9 @@ type Driver struct {
 	volumeCaps     []csi.VolumeCapability_AccessMode_Mode
 
 	// Mutex for serializing volume attachment per server to prevent race conditions
-	serverAttachMu   sync.Mutex
+	serverAttachMu    sync.Mutex
 	serverAttachLocks map[string]*sync.Mutex
-	
+
 	// Mutex for serializing device discovery on node to prevent race conditions
 	nodeDeviceMu sync.Mutex
 }

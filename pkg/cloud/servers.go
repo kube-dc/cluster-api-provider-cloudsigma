@@ -276,7 +276,7 @@ func (c *Client) GetServerAddressesWithClient(ctx context.Context, server *cloud
 			klog.V(2).Infof("Failed to fetch IP %s: %v", uuid, err)
 			continue
 		}
-		
+
 		// CloudSigma uses the IP address as the UUID, so ip.UUID contains the actual IP
 		ipAddr := ip.UUID
 		if ipAddr != "" {
