@@ -29,6 +29,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+
+	"github.com/kube-dc/cluster-api-provider-cloudsigma/pkg/auth"
 )
 
 // NodeReconciler reconciles nodes in the tenant cluster
@@ -38,10 +40,14 @@ type NodeReconciler struct {
 	TenantKubeconfig string
 	// ClusterName is the name of the cluster being managed
 	ClusterName string
-	// CloudSigma credentials
+	// CloudSigma legacy credentials (fallback)
 	CloudSigmaUsername string
 	CloudSigmaPassword string
 	CloudSigmaRegion   string
+	// Impersonation config (preferred)
+	ImpersonationClient  *auth.ImpersonationClient
+	ImpersonationEnabled bool
+	UserEmail            string
 
 	tenantClient     kubernetes.Interface
 	cloudsigmaClient *cloudsigma.Client
@@ -63,17 +69,30 @@ func (r *NodeReconciler) Start(ctx context.Context) error {
 
 	klog.Infof("Connected to tenant cluster: %s", r.ClusterName)
 
-	// Create CloudSigma client if credentials are provided
-	if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
-		cred := cloudsigma.NewUsernamePasswordCredentialsProvider(r.CloudSigmaUsername, r.CloudSigmaPassword)
-		region := r.CloudSigmaRegion
-		if region == "" {
-			region = "zrh"
+	// Create CloudSigma client
+	region := r.CloudSigmaRegion
+	if region == "" {
+		region = "zrh"
+	}
+
+	if r.ImpersonationEnabled && r.ImpersonationClient != nil && r.UserEmail != "" {
+		// Use impersonation (preferred)
+		klog.Infof("Using impersonation for user: %s in region: %s", r.UserEmail, region)
+		token, err := r.ImpersonationClient.GetImpersonatedToken(ctx, r.UserEmail, region)
+		if err != nil {
+			return fmt.Errorf("failed to get impersonated token: %w", err)
 		}
+		cred := cloudsigma.NewTokenCredentialsProvider(token)
+		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
+		klog.Infof("CloudSigma client initialized with impersonation for region: %s", region)
+	} else if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
+		// Fallback to legacy credentials
+		klog.Info("Using legacy username/password credentials")
+		cred := cloudsigma.NewUsernamePasswordCredentialsProvider(r.CloudSigmaUsername, r.CloudSigmaPassword)
 		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
 		klog.Infof("CloudSigma client initialized for region: %s", region)
 	} else {
-		klog.Warning("CloudSigma credentials not provided, node addresses will not be updated")
+		klog.Warning("No CloudSigma credentials provided, node addresses will not be updated")
 	}
 
 	// Start node sync loop
