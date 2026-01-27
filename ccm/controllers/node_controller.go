@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
@@ -51,6 +52,7 @@ type NodeReconciler struct {
 
 	tenantClient     kubernetes.Interface
 	cloudsigmaClient *cloudsigma.Client
+	clientMutex      sync.RWMutex
 }
 
 // Start initializes the tenant client and starts the node sync loop
@@ -69,34 +71,49 @@ func (r *NodeReconciler) Start(ctx context.Context) error {
 
 	klog.Infof("Connected to tenant cluster: %s", r.ClusterName)
 
-	// Create CloudSigma client
+	// Initialize CloudSigma client (will be refreshed on each sync for impersonation)
+	if err := r.refreshCloudSigmaClient(ctx); err != nil {
+		klog.Warningf("Initial CloudSigma client creation failed: %v", err)
+	}
+
+	// Start node sync loop
+	go r.syncLoop(ctx)
+
+	return nil
+}
+
+// refreshCloudSigmaClient creates or refreshes the CloudSigma client
+// For impersonation, this gets a fresh token (cached by ImpersonationClient)
+func (r *NodeReconciler) refreshCloudSigmaClient(ctx context.Context) error {
 	region := r.CloudSigmaRegion
 	if region == "" {
 		region = "zrh"
 	}
 
+	r.clientMutex.Lock()
+	defer r.clientMutex.Unlock()
+
 	if r.ImpersonationEnabled && r.ImpersonationClient != nil && r.UserEmail != "" {
-		// Use impersonation (preferred)
-		klog.Infof("Using impersonation for user: %s in region: %s", r.UserEmail, region)
+		// Use impersonation (preferred) - ImpersonationClient handles caching internally
+		klog.V(2).Infof("Refreshing CloudSigma client with impersonation for user: %s in region: %s", r.UserEmail, region)
 		token, err := r.ImpersonationClient.GetImpersonatedToken(ctx, r.UserEmail, region)
 		if err != nil {
 			return fmt.Errorf("failed to get impersonated token: %w", err)
 		}
 		cred := cloudsigma.NewTokenCredentialsProvider(token)
 		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
-		klog.Infof("CloudSigma client initialized with impersonation for region: %s", region)
+		klog.V(2).Infof("CloudSigma client refreshed with impersonation for region: %s", region)
 	} else if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
-		// Fallback to legacy credentials
-		klog.Info("Using legacy username/password credentials")
-		cred := cloudsigma.NewUsernamePasswordCredentialsProvider(r.CloudSigmaUsername, r.CloudSigmaPassword)
-		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
-		klog.Infof("CloudSigma client initialized for region: %s", region)
-	} else {
+		// Legacy credentials - only create once
+		if r.cloudsigmaClient == nil {
+			klog.Info("Using legacy username/password credentials")
+			cred := cloudsigma.NewUsernamePasswordCredentialsProvider(r.CloudSigmaUsername, r.CloudSigmaPassword)
+			r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
+			klog.Infof("CloudSigma client initialized for region: %s", region)
+		}
+	} else if r.cloudsigmaClient == nil {
 		klog.Warning("No CloudSigma credentials provided, node addresses will not be updated")
 	}
-
-	// Start node sync loop
-	go r.syncLoop(ctx)
 
 	return nil
 }
@@ -126,6 +143,11 @@ func (r *NodeReconciler) syncLoop(ctx context.Context) {
 
 // syncNodes syncs all nodes - removes cloud-provider taint and updates addresses
 func (r *NodeReconciler) syncNodes(ctx context.Context) error {
+	// Refresh CloudSigma client (gets fresh token if using impersonation)
+	if err := r.refreshCloudSigmaClient(ctx); err != nil {
+		klog.Errorf("Failed to refresh CloudSigma client: %v", err)
+	}
+
 	nodes, err := r.tenantClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list nodes: %w", err)
@@ -224,7 +246,15 @@ func (r *NodeReconciler) hasIPAddress(node *corev1.Node) bool {
 
 // getVMAddresses queries CloudSigma API to get VM IP addresses
 func (r *NodeReconciler) getVMAddresses(ctx context.Context, vmUUID string) ([]corev1.NodeAddress, error) {
-	server, _, err := r.cloudsigmaClient.Servers.Get(ctx, vmUUID)
+	r.clientMutex.RLock()
+	client := r.cloudsigmaClient
+	r.clientMutex.RUnlock()
+
+	if client == nil {
+		return nil, fmt.Errorf("CloudSigma client not initialized")
+	}
+
+	server, _, err := client.Servers.Get(ctx, vmUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server: %w", err)
 	}
@@ -240,7 +270,7 @@ func (r *NodeReconciler) getVMAddresses(ctx context.Context, vmUUID string) ([]c
 	}
 
 	// Get IP addresses by querying the IPs endpoint for IPs attached to this server
-	ips, _, err := r.cloudsigmaClient.IPs.List(ctx)
+	ips, _, err := client.IPs.List(ctx)
 	if err != nil {
 		klog.Errorf("Failed to list IPs: %v", err)
 	} else {
