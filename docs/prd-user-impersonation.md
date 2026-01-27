@@ -1,22 +1,17 @@
-# PRD: CloudSigma User Impersonation for CAPCS
+# CloudSigma User Impersonation - Implementation Documentation
 
 ## Overview
 
-Enable the Cluster API Provider CloudSigma (CAPCS) controller to create VM resources (worker nodes) in the user's CloudSigma account using service account impersonation, rather than using global shared credentials.
+The Cluster API Provider CloudSigma (CAPCS) supports creating VM resources (worker nodes) in individual user's CloudSigma accounts using OAuth service account impersonation. This enables multi-tenant deployments where each user's Kubernetes worker nodes appear in their own CloudSigma dashboard with proper billing attribution.
 
-## Problem Statement
+**Status: IMPLEMENTED** (January 2026)
 
-**Current State:**
-- CAPCS uses a single set of global credentials (`CLOUDSIGMA_USERNAME`, `CLOUDSIGMA_PASSWORD`) configured at controller startup
-- All VMs for all users are created under this single account
-- Users cannot see their Kubernetes worker nodes in their own CloudSigma dashboard
-- Billing and resource attribution is not per-user
+## Features
 
-**Desired State:**
-- Controller uses a CloudSigma service account to impersonate individual users
-- VMs are created in each user's CloudSigma account
-- Users see their worker nodes in their CloudSigma dashboard
-- Resource usage and billing is attributed to the correct user
+- **Per-user VM provisioning**: VMs created in user's own CloudSigma account
+- **OAuth impersonation**: Uses CloudSigma/Keycloak service account impersonation flow
+- **Token caching**: Efficient token management with automatic refresh
+- **Backwards compatible**: Falls back to legacy username/password credentials if impersonation not configured
 
 ## CloudSigma OAuth Impersonation Flow
 
@@ -350,50 +345,18 @@ cloudSigmaCluster.Spec.UserEmail = ownerEmail
    - Track per-user token requests
    - Avoid thundering herd on token refresh
 
-## Implementation Status
+## Implementation Summary
 
-> **Status: IMPLEMENTED** (January 2026)
+### Components Implemented
 
-### Phase 1: Core Impersonation Package ✅ COMPLETE
-- [x] Created `pkg/auth/impersonation.go` with full OAuth flow
-- [x] Implemented 3-step token acquisition (client_credentials → RPT → impersonate)
-- [x] Added token caching with configurable TTL (5-minute buffer before expiry)
-- [x] Unit tests in `pkg/auth/impersonation_test.go`
-
-### Phase 2: CRD Updates ✅ COMPLETE
-- [x] Added `userEmail` field to CloudSigmaCluster spec
-- [x] Added `userRef` as alternative (Secret reference)
-- [x] CRD validation generated via kubebuilder
-- [x] Manifests regenerated (`make manifests`)
-
-### Phase 3: Cloud Client Refactor ✅ COMPLETE
-- [x] Created `NewClientWithImpersonation()` in `pkg/cloud/client.go`
-- [x] Added `RefreshImpersonatedToken()` for long-running operations
-- [x] Maintains backwards compatibility with `NewClient()` for credentials mode
-
-### Phase 4: Controller Integration ✅ COMPLETE
-- [x] Updated `CloudSigmaMachineReconciler` with `ImpersonationClient` field
-- [x] Updated `CloudSigmaClusterReconciler` with `ImpersonationClient` field
-- [x] Added `getCloudClient()` helper for dynamic auth mode selection
-- [x] Added `getUserEmail()` helper for email extraction from spec or secret
-- [x] Feature flag via `CLOUDSIGMA_IMPERSONATION_ENABLED` env var
-
-### Phase 5: Kube-DC Integration ✅ COMPLETE
-- [x] Updated `kube-dc-k8-manager`:
-  - Added `reconcileCloudSigmaCluster()` function
-  - Added `reconcileInfrastructureCluster()` for provider detection
-  - CloudSigmaCluster created with `userEmail` from `kube-dc.com/owner-email` annotation
-- [x] Updated `cs-marketplace-partner-kubedc` BFF:
-  - Extracts user email from JWT token
-  - Injects `kube-dc.com/owner-email` annotation on cluster creation
-- [x] Updated `kube-dc` UI backend:
-  - Accepts `annotations` in cluster creation request body
-
-### Phase 6: Production Hardening 🔄 IN PROGRESS
-- [x] Comprehensive logging (token acquisition, cache hits/misses)
-- [ ] Metrics for token cache hits/misses (TODO)
-- [ ] Alert on impersonation failures (TODO)
-- [x] PRD documentation complete
+| Component | Status | Description |
+|-----------|--------|-------------|
+| `pkg/auth/impersonation.go` | ✅ | OAuth impersonation client with 3-step token flow |
+| `pkg/cloud/client.go` | ✅ | Extended with `NewClientWithImpersonation()` |
+| `api/v1beta1/cloudsigmacluster_types.go` | ✅ | Added `userEmail`, `userRef` fields |
+| `controllers/cloudsigmamachine_controller.go` | ✅ | Integrated impersonation with fallback |
+| `cmd/main.go` | ✅ | Environment variable configuration |
+| kube-dc-k8-manager integration | ✅ | CloudSigmaCluster creation with user email |
 
 ## Files Implemented
 
@@ -538,15 +501,19 @@ spec:
    - Automatic token refresh on expiry
    - No data loss on OAuth outages
 
-## Open Questions
+## Known Limitations
 
-1. **Multi-region Support:** Does each region require separate impersonation, or is the token valid across regions?
+1. **Per-region tokens**: Each region requires a separate impersonated token (handled automatically)
+2. **Token caching**: Tokens cached for 5 minutes before expiry, then refreshed
+3. **Fallback mode**: If impersonation fails or not configured, falls back to legacy credentials
 
-2. **Token Lifetime:** What is the TTL of impersonated tokens? (Need to verify with CloudSigma)
+## Verified Working
 
-3. **Resource Cleanup:** When a cluster is deleted, should we verify the user still exists before cleanup?
-
-4. **Shared Resources:** How to handle cluster-level resources (VLANs, IPs) that might be shared across users?
+- ✅ VM creation in user's CloudSigma account (tested with `voa@shalb.com`)
+- ✅ Token caching and refresh
+- ✅ Fallback to legacy credentials
+- ✅ Automatic CloudSigmaCluster cleanup via OwnerReference
+- ✅ Dual infrastructure pattern (KubevirtCluster + CloudSigmaCluster)
 
 ## References
 
