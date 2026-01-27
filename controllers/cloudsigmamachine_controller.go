@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	infrav1 "github.com/kube-dc/cluster-api-provider-cloudsigma/api/v1beta1"
+	"github.com/kube-dc/cluster-api-provider-cloudsigma/pkg/auth"
 	"github.com/kube-dc/cluster-api-provider-cloudsigma/pkg/cloud"
 )
 
@@ -51,9 +52,14 @@ type CloudSigmaMachineReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// Legacy credential-based authentication (deprecated when impersonation is enabled)
 	CloudSigmaUsername string
 	CloudSigmaPassword string
 	CloudSigmaRegion   string
+
+	// Impersonation-based authentication (preferred)
+	// When set, the controller will use OAuth impersonation to create VMs in user accounts
+	ImpersonationClient *auth.ImpersonationClient
 }
 
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=cloudsigmamachines,verbs=get;list;watch;create;update;patch;delete
@@ -101,8 +107,19 @@ func (r *CloudSigmaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize the cloud client
-	cloudClient, err := cloud.NewClient(r.CloudSigmaUsername, r.CloudSigmaPassword, r.CloudSigmaRegion)
+	// Fetch the CloudSigmaCluster to get user email for impersonation
+	cloudSigmaCluster := &infrav1.CloudSigmaCluster{}
+	cloudSigmaClusterKey := client.ObjectKey{
+		Namespace: cloudSigmaMachine.Namespace,
+		Name:      cluster.Spec.InfrastructureRef.Name,
+	}
+	if err := r.Get(ctx, cloudSigmaClusterKey, cloudSigmaCluster); err != nil {
+		log.Error(err, "Failed to get CloudSigmaCluster")
+		return ctrl.Result{}, errors.Wrap(err, "failed to get CloudSigmaCluster")
+	}
+
+	// Initialize the cloud client (with or without impersonation)
+	cloudClient, err := r.getCloudClient(ctx, cloudSigmaCluster)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to create CloudSigma client")
 	}
@@ -114,6 +131,62 @@ func (r *CloudSigmaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Handle non-deleted machines
 	return r.reconcileNormal(ctx, cloudClient, machine, cloudSigmaMachine)
+}
+
+// getCloudClient creates a CloudSigma client, using impersonation if configured
+func (r *CloudSigmaMachineReconciler) getCloudClient(ctx context.Context, cloudSigmaCluster *infrav1.CloudSigmaCluster) (*cloud.Client, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	// Determine region - prefer cluster spec, fallback to controller default
+	region := cloudSigmaCluster.Spec.Region
+	if region == "" {
+		region = r.CloudSigmaRegion
+	}
+
+	// Get user email for impersonation
+	userEmail := r.getUserEmail(ctx, cloudSigmaCluster)
+
+	// Use impersonation if available and user email is provided
+	if r.ImpersonationClient != nil && userEmail != "" {
+		log.Info("Using impersonation mode", "userEmail", userEmail, "region", region)
+		return cloud.NewClientWithImpersonation(ctx, r.ImpersonationClient, userEmail, region)
+	}
+
+	// Fallback to legacy credential-based authentication
+	if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
+		log.Info("Using legacy credential mode", "region", region)
+		return cloud.NewClient(r.CloudSigmaUsername, r.CloudSigmaPassword, region)
+	}
+
+	return nil, fmt.Errorf("no CloudSigma credentials configured: set either impersonation client with user email, or username/password")
+}
+
+// getUserEmail extracts the user email from CloudSigmaCluster spec or referenced secret
+func (r *CloudSigmaMachineReconciler) getUserEmail(ctx context.Context, cloudSigmaCluster *infrav1.CloudSigmaCluster) string {
+	// Direct user email takes precedence
+	if cloudSigmaCluster.Spec.UserEmail != "" {
+		return cloudSigmaCluster.Spec.UserEmail
+	}
+
+	// Try to get from referenced secret
+	if cloudSigmaCluster.Spec.UserRef != nil {
+		secret := &corev1.Secret{}
+		secretKey := client.ObjectKey{
+			Namespace: cloudSigmaCluster.Spec.UserRef.Namespace,
+			Name:      cloudSigmaCluster.Spec.UserRef.Name,
+		}
+		if secretKey.Namespace == "" {
+			secretKey.Namespace = cloudSigmaCluster.Namespace
+		}
+
+		if err := r.Get(ctx, secretKey, secret); err == nil {
+			if email, ok := secret.Data["userEmail"]; ok {
+				return string(email)
+			}
+		}
+	}
+
+	return ""
 }
 
 func (r *CloudSigmaMachineReconciler) reconcileNormal(

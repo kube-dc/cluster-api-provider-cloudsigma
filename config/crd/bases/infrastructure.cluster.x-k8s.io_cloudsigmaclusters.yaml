@@ -74,8 +74,9 @@ spec:
                 - port
                 type: object
               credentialsRef:
-                description: CredentialsRef is a reference to a Secret containing
-                  CloudSigma credentials
+                description: |-
+                  CredentialsRef is a reference to a Secret containing CloudSigma credentials
+                  Used for legacy credential-based authentication (deprecated when impersonation is enabled)
                 properties:
                   name:
                     description: Name of the referenced object
@@ -105,6 +106,27 @@ spec:
                 description: Region is the CloudSigma datacenter region (e.g., "zrh",
                   "fra", "next")
                 type: string
+              userEmail:
+                description: |-
+                  UserEmail is the email address of the CloudSigma user to impersonate when creating resources.
+                  When set, the controller will use OAuth impersonation to create VMs in the user's account.
+                  This requires the controller to be configured with service account credentials for impersonation.
+                type: string
+              userRef:
+                description: |-
+                  UserRef is a reference to a Secret containing user information for impersonation.
+                  The secret should contain a 'userEmail' key with the user's CloudSigma email address.
+                  Alternative to specifying userEmail directly.
+                properties:
+                  name:
+                    description: Name of the referenced object
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced object
+                    type: string
+                required:
+                - name
+                type: object
               vlan:
                 description: VLAN specifies the VLAN configuration for the cluster
                   network

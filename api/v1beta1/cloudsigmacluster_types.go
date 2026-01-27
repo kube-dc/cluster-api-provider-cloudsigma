@@ -32,8 +32,21 @@ type CloudSigmaClusterSpec struct {
 	LoadBalancer *LoadBalancerSpec `json:"loadBalancer,omitempty"`
 
 	// CredentialsRef is a reference to a Secret containing CloudSigma credentials
+	// Used for legacy credential-based authentication (deprecated when impersonation is enabled)
 	// +optional
 	CredentialsRef *ObjectReference `json:"credentialsRef,omitempty"`
+
+	// UserEmail is the email address of the CloudSigma user to impersonate when creating resources.
+	// When set, the controller will use OAuth impersonation to create VMs in the user's account.
+	// This requires the controller to be configured with service account credentials for impersonation.
+	// +optional
+	UserEmail string `json:"userEmail,omitempty"`
+
+	// UserRef is a reference to a Secret containing user information for impersonation.
+	// The secret should contain a 'userEmail' key with the user's CloudSigma email address.
+	// Alternative to specifying userEmail directly.
+	// +optional
+	UserRef *ObjectReference `json:"userRef,omitempty"`
 }
 
 // VLANSpec defines the VLAN configuration

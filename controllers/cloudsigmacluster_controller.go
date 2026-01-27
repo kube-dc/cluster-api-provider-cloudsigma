@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	infrav1 "github.com/kube-dc/cluster-api-provider-cloudsigma/api/v1beta1"
+	"github.com/kube-dc/cluster-api-provider-cloudsigma/pkg/auth"
 	"github.com/kube-dc/cluster-api-provider-cloudsigma/pkg/cloud"
 )
 
@@ -44,9 +45,13 @@ type CloudSigmaClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// Legacy credential-based authentication (deprecated when impersonation is enabled)
 	CloudSigmaUsername string
 	CloudSigmaPassword string
 	CloudSigmaRegion   string
+
+	// Impersonation-based authentication (preferred)
+	ImpersonationClient *auth.ImpersonationClient
 }
 
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=cloudsigmaclusters,verbs=get;list;watch;create;update;patch;delete
