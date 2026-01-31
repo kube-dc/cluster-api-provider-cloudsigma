@@ -37,6 +37,7 @@ type Client struct {
 	impersonationClient *auth.ImpersonationClient
 	impersonatedUser    string
 	useImpersonation    bool
+	accessToken         string // Current access token for impersonation
 }
 
 // NewClient creates a new CloudSigma client wrapper using username/password credentials.
@@ -103,6 +104,7 @@ func NewClientWithImpersonation(ctx context.Context, impersonationClient *auth.I
 		impersonationClient: impersonationClient,
 		impersonatedUser:    userEmail,
 		useImpersonation:    true,
+		accessToken:         token,
 	}, nil
 }
 
@@ -123,6 +125,7 @@ func (c *Client) RefreshImpersonatedToken(ctx context.Context) error {
 	// Recreate SDK client with new token
 	cred := cloudsigma.NewTokenCredentialsProvider(token)
 	c.sdk = cloudsigma.NewClient(cred, cloudsigma.WithLocation(c.region))
+	c.accessToken = token
 
 	return nil
 }

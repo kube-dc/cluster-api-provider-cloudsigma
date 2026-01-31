@@ -100,8 +100,14 @@ func (c *Client) createServerDirect(ctx context.Context, server *CustomServer) (
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
-	// Add basic auth (same as SDK uses)
-	httpReq.SetBasicAuth(c.username, c.password)
+	// Add authentication - use Bearer token for impersonation, Basic Auth for legacy
+	if c.useImpersonation && c.accessToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.accessToken)
+		klog.V(4).Infof("Using Bearer token authentication for user: %s", c.impersonatedUser)
+	} else {
+		httpReq.SetBasicAuth(c.username, c.password)
+		klog.V(4).Info("Using Basic Auth authentication")
+	}
 
 	// Execute request
 	httpClient := &http.Client{}
