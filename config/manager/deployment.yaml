@@ -31,22 +31,42 @@ spec:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
           env:
-            - name: CLOUDSIGMA_USERNAME
+            # Impersonation configuration (default mode)
+            - name: CLOUDSIGMA_OAUTH_URL
               valueFrom:
                 secretKeyRef:
-                  name: cloudsigma-credentials
-                  key: username
-            - name: CLOUDSIGMA_PASSWORD
+                  name: cloudsigma-impersonation
+                  key: oauth-url
+            - name: CLOUDSIGMA_CLIENT_ID
               valueFrom:
                 secretKeyRef:
-                  name: cloudsigma-credentials
-                  key: password
+                  name: cloudsigma-impersonation
+                  key: client-id
+            - name: CLOUDSIGMA_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsigma-impersonation
+                  key: client-secret
             - name: CLOUDSIGMA_REGION
               valueFrom:
                 secretKeyRef:
-                  name: cloudsigma-credentials
+                  name: cloudsigma-impersonation
                   key: region
                   optional: true
+            # Legacy credentials - DISABLED by default
+            # Uncomment and set CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true to enable
+            # - name: CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS
+            #   value: "true"
+            # - name: CLOUDSIGMA_USERNAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: cloudsigma-credentials
+            #       key: username
+            # - name: CLOUDSIGMA_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: cloudsigma-credentials
+            #       key: password
           ports:
             - containerPort: 8080
               name: metrics
