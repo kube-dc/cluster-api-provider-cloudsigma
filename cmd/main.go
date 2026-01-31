@@ -53,13 +53,13 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 
-	// Legacy credential-based authentication
+	// Legacy credential-based authentication (only used when explicitly enabled)
 	var cloudsigmaUsername string
 	var cloudsigmaPassword string
 	var cloudsigmaRegion string
+	var legacyCredentialsEnabled bool
 
-	// Impersonation-based authentication (preferred)
-	var impersonationEnabled bool
+	// Impersonation-based authentication (default)
 	var oauthURL string
 	var clientID string
 	var clientSecret string
@@ -70,16 +70,16 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 
-	// Legacy credentials (deprecated when impersonation is enabled)
-	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username (legacy mode)")
-	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (legacy mode)")
-	flag.StringVar(&cloudsigmaRegion, "cloudsigma-region", os.Getenv("CLOUDSIGMA_REGION"), "CloudSigma region (default: zrh)")
-
-	// Impersonation configuration
-	flag.BoolVar(&impersonationEnabled, "impersonation-enabled", os.Getenv("CLOUDSIGMA_IMPERSONATION_ENABLED") == "true", "Enable OAuth impersonation mode")
+	// Impersonation configuration (default mode)
 	flag.StringVar(&oauthURL, "oauth-url", os.Getenv("CLOUDSIGMA_OAUTH_URL"), "CloudSigma OAuth/Keycloak URL for impersonation")
 	flag.StringVar(&clientID, "client-id", os.Getenv("CLOUDSIGMA_CLIENT_ID"), "Service account client ID for impersonation")
 	flag.StringVar(&clientSecret, "client-secret", os.Getenv("CLOUDSIGMA_CLIENT_SECRET"), "Service account client secret for impersonation")
+
+	// Legacy credentials (must be explicitly enabled)
+	flag.BoolVar(&legacyCredentialsEnabled, "enable-legacy-credentials", os.Getenv("CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS") == "true", "Enable legacy username/password authentication as fallback")
+	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username (only used with --enable-legacy-credentials)")
+	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (only used with --enable-legacy-credentials)")
+	flag.StringVar(&cloudsigmaRegion, "cloudsigma-region", os.Getenv("CLOUDSIGMA_REGION"), "CloudSigma region (default: zrh)")
 
 	opts := zap.Options{
 		Development: true,
@@ -89,16 +89,11 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// Determine authentication mode
+	// Determine authentication mode - impersonation is default
 	var impersonationClient *auth.ImpersonationClient
 
-	if impersonationEnabled {
-		// Validate impersonation configuration
-		if oauthURL == "" || clientID == "" || clientSecret == "" {
-			setupLog.Error(nil, "Impersonation mode requires CLOUDSIGMA_OAUTH_URL, CLOUDSIGMA_CLIENT_ID, and CLOUDSIGMA_CLIENT_SECRET")
-			os.Exit(1)
-		}
-
+	// Setup impersonation (default mode)
+	if oauthURL != "" && clientID != "" && clientSecret != "" {
 		var err error
 		impersonationClient, err = auth.NewImpersonationClient(auth.ImpersonationConfig{
 			OAuthURL:     oauthURL,
@@ -109,22 +104,36 @@ func main() {
 			setupLog.Error(err, "Failed to create impersonation client")
 			os.Exit(1)
 		}
-
-		setupLog.Info("Impersonation mode enabled", "oauthURL", oauthURL, "clientID", clientID)
+		setupLog.Info("Impersonation mode configured (default)", "oauthURL", oauthURL, "clientID", clientID)
 	} else {
-		// Validate legacy credentials
+		setupLog.Info("Impersonation not configured - CLOUDSIGMA_OAUTH_URL, CLOUDSIGMA_CLIENT_ID, CLOUDSIGMA_CLIENT_SECRET required")
+	}
+
+	// Legacy credentials - only used when explicitly enabled
+	if legacyCredentialsEnabled {
 		if cloudsigmaUsername == "" || cloudsigmaPassword == "" {
-			setupLog.Error(nil, "CloudSigma credentials are required. Set CLOUDSIGMA_USERNAME and CLOUDSIGMA_PASSWORD, or enable impersonation mode.")
+			setupLog.Error(nil, "Legacy credentials enabled but CLOUDSIGMA_USERNAME and CLOUDSIGMA_PASSWORD not set")
 			os.Exit(1)
 		}
-		setupLog.Info("Legacy credential mode enabled")
+		setupLog.Info("Legacy credential fallback ENABLED (explicit)", "username", cloudsigmaUsername)
+	} else {
+		// Clear legacy credentials when not explicitly enabled
+		cloudsigmaUsername = ""
+		cloudsigmaPassword = ""
+		setupLog.Info("Legacy credential fallback DISABLED (default)")
+	}
+
+	// Validate we have at least one auth method
+	if impersonationClient == nil && !legacyCredentialsEnabled {
+		setupLog.Error(nil, "No authentication configured. Set impersonation (CLOUDSIGMA_OAUTH_URL, CLOUDSIGMA_CLIENT_ID, CLOUDSIGMA_CLIENT_SECRET) or enable legacy credentials (CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true)")
+		os.Exit(1)
 	}
 
 	if cloudsigmaRegion == "" {
 		cloudsigmaRegion = "zrh" // Default to Zurich
 	}
 
-	setupLog.Info("Starting CAPCS", "region", cloudsigmaRegion, "impersonation", impersonationEnabled)
+	setupLog.Info("Starting CAPCS", "region", cloudsigmaRegion, "impersonation", impersonationClient != nil, "legacyFallback", legacyCredentialsEnabled)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,

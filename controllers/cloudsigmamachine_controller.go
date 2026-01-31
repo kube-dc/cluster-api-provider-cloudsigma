@@ -108,14 +108,18 @@ func (r *CloudSigmaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Fetch the CloudSigmaCluster to get user email for impersonation
+	// Note: InfrastructureRef may point to KubevirtCluster (for Kamaji compatibility),
+	// so we look up CloudSigmaCluster by the CAPI cluster name directly
 	cloudSigmaCluster := &infrav1.CloudSigmaCluster{}
 	cloudSigmaClusterKey := client.ObjectKey{
 		Namespace: cloudSigmaMachine.Namespace,
-		Name:      cluster.Spec.InfrastructureRef.Name,
+		Name:      cluster.Name, // Use cluster name, not InfrastructureRef.Name
 	}
 	if err := r.Get(ctx, cloudSigmaClusterKey, cloudSigmaCluster); err != nil {
-		log.Error(err, "Failed to get CloudSigmaCluster")
-		return ctrl.Result{}, errors.Wrap(err, "failed to get CloudSigmaCluster")
+		// CloudSigmaCluster may not exist if this is a non-CloudSigma cluster
+		// In that case, we'll fall back to legacy credentials
+		log.Info("CloudSigmaCluster not found, will use legacy credentials if available", "clusterName", cluster.Name)
+		cloudSigmaCluster = nil
 	}
 
 	// Initialize the cloud client (with or without impersonation)
@@ -138,13 +142,19 @@ func (r *CloudSigmaMachineReconciler) getCloudClient(ctx context.Context, cloudS
 	log := ctrl.LoggerFrom(ctx)
 
 	// Determine region - prefer cluster spec, fallback to controller default
-	region := cloudSigmaCluster.Spec.Region
+	var region string
+	if cloudSigmaCluster != nil {
+		region = cloudSigmaCluster.Spec.Region
+	}
 	if region == "" {
 		region = r.CloudSigmaRegion
 	}
 
-	// Get user email for impersonation
-	userEmail := r.getUserEmail(ctx, cloudSigmaCluster)
+	// Get user email for impersonation (only if CloudSigmaCluster exists)
+	var userEmail string
+	if cloudSigmaCluster != nil {
+		userEmail = r.getUserEmail(ctx, cloudSigmaCluster)
+	}
 
 	// Use impersonation if available and user email is provided
 	if r.ImpersonationClient != nil && userEmail != "" {
@@ -152,13 +162,24 @@ func (r *CloudSigmaMachineReconciler) getCloudClient(ctx context.Context, cloudS
 		return cloud.NewClientWithImpersonation(ctx, r.ImpersonationClient, userEmail, region)
 	}
 
-	// Fallback to legacy credential-based authentication
+	// Fallback to legacy credential-based authentication (only if explicitly enabled)
 	if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
-		log.Info("Using legacy credential mode", "region", region)
+		// Log why we're falling back to legacy mode for traceability
+		fallbackReason := "unknown"
+		if r.ImpersonationClient == nil {
+			fallbackReason = "impersonation client not configured"
+		} else if userEmail == "" {
+			fallbackReason = "userEmail not set in CloudSigmaCluster"
+		}
+		log.Info("Using legacy credential mode (FALLBACK)", "region", region, "reason", fallbackReason, "username", r.CloudSigmaUsername)
 		return cloud.NewClient(r.CloudSigmaUsername, r.CloudSigmaPassword, region)
 	}
 
-	return nil, fmt.Errorf("no CloudSigma credentials configured: set either impersonation client with user email, or username/password")
+	// No valid authentication method available
+	if r.ImpersonationClient != nil && userEmail == "" {
+		return nil, fmt.Errorf("impersonation configured but userEmail not set in CloudSigmaCluster spec - ensure CloudSigmaCluster has spec.userEmail set")
+	}
+	return nil, fmt.Errorf("no CloudSigma authentication available: impersonation requires userEmail in CloudSigmaCluster, legacy credentials not enabled")
 }
 
 // getUserEmail extracts the user email from CloudSigmaCluster spec or referenced secret
