@@ -80,16 +80,63 @@ kubectl apply -f https://raw.githubusercontent.com/kube-dc/cluster-api-provider-
 kubectl apply -f config/install.yaml
 ```
 
-### 2. Configure CloudSigma Credentials
+### 2. Configure Authentication
+
+CAPCS supports two authentication modes. **Impersonation is the default and recommended mode**.
+
+#### Option A: OAuth Impersonation (Default - Recommended)
+
+Creates VMs in individual user's CloudSigma accounts using service account impersonation.
 
 ```bash
-# Create secret with CloudSigma credentials
+# Create secret with OAuth impersonation credentials
+kubectl create secret generic cloudsigma-impersonation \
+  --namespace=capcs-system \
+  --from-literal=oauth-url='https://oauth.cloudsigma.com' \
+  --from-literal=client-id='your-service-account-client-id' \
+  --from-literal=client-secret='your-service-account-secret'
+
+# Set environment variables in deployment
+CLOUDSIGMA_OAUTH_URL=https://oauth.cloudsigma.com
+CLOUDSIGMA_CLIENT_ID=your-service-account-client-id
+CLOUDSIGMA_CLIENT_SECRET=your-service-account-secret
+CLOUDSIGMA_REGION=zrh
+```
+
+With impersonation, each `CloudSigmaCluster` must have `spec.userEmail` set to specify which user's account to create VMs in.
+
+#### Option B: Legacy Credentials (Must be explicitly enabled)
+
+Uses a single CloudSigma account for all VMs. **Disabled by default** - requires explicit opt-in.
+
+```bash
+# Create secret with legacy credentials
 kubectl create secret generic cloudsigma-credentials \
   --namespace=capcs-system \
   --from-literal=username='your-email@example.com' \
   --from-literal=password='your-api-password' \
   --from-literal=region='zrh'
 
+# Enable legacy mode (required - disabled by default)
+CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true
+CLOUDSIGMA_USERNAME=your-email@example.com
+CLOUDSIGMA_PASSWORD=your-api-password
+CLOUDSIGMA_REGION=zrh
+```
+
+#### Environment Variables Reference
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `CLOUDSIGMA_OAUTH_URL` | OAuth/Keycloak URL for impersonation | For impersonation |
+| `CLOUDSIGMA_CLIENT_ID` | Service account client ID | For impersonation |
+| `CLOUDSIGMA_CLIENT_SECRET` | Service account client secret | For impersonation |
+| `CLOUDSIGMA_REGION` | CloudSigma region (zrh, sjc, hnl, per) | Yes |
+| `CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS` | Set to `true` to enable legacy auth | For legacy mode |
+| `CLOUDSIGMA_USERNAME` | CloudSigma username (legacy) | For legacy mode |
+| `CLOUDSIGMA_PASSWORD` | CloudSigma password (legacy) | For legacy mode |
+
+```bash
 # Verify provider is running
 kubectl get pods -n capcs-system
 kubectl logs -n capcs-system -l control-plane=controller-manager

@@ -11,7 +11,7 @@ The Cluster API Provider CloudSigma (CAPCS) supports creating VM resources (work
 - **Per-user VM provisioning**: VMs created in user's own CloudSigma account
 - **OAuth impersonation**: Uses CloudSigma/Keycloak service account impersonation flow
 - **Token caching**: Efficient token management with automatic refresh
-- **Backwards compatible**: Falls back to legacy username/password credentials if impersonation not configured
+- **Impersonation by default**: Legacy credentials require explicit opt-in via `CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true`
 
 ## CloudSigma OAuth Impersonation Flow
 
@@ -104,21 +104,27 @@ Authorization: Bearer <impersonated_token_from_step_3>
 
 ## Architecture Changes
 
-### 1. New Configuration Options
+### 1. Configuration Options
 
-**Environment Variables / Flags:**
-```
-# Service Account Credentials (replaces username/password)
+**Environment Variables / Flags (Impersonation - Default Mode):**
+```bash
+# Required for impersonation (default)
 CLOUDSIGMA_OAUTH_URL=https://oauth.cloudsigma.com
 CLOUDSIGMA_CLIENT_ID=kubernetes_cluster_service
 CLOUDSIGMA_CLIENT_SECRET=<secret>
-
-# Optional: API base URL per region
-CLOUDSIGMA_API_URL=https://direct.{region}.cloudsigma.com
-
-# Legacy mode (for backwards compatibility)
-CLOUDSIGMA_IMPERSONATION_ENABLED=true
+CLOUDSIGMA_REGION=next
 ```
+
+**Environment Variables / Flags (Legacy Mode - Must be explicitly enabled):**
+```bash
+# Only used when explicitly enabled
+CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true
+CLOUDSIGMA_USERNAME=<username>
+CLOUDSIGMA_PASSWORD=<password>
+CLOUDSIGMA_REGION=next
+```
+
+**Important:** Legacy credentials are **disabled by default**. If `CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS` is not set to `true`, the controller will require impersonation and fail with a clear error if `userEmail` is not set in the CloudSigmaCluster.
 
 ### 2. CRD Changes
 
@@ -471,8 +477,10 @@ spec:
             secretKeyRef:
               name: cloudsigma-impersonation
               key: client-secret
-        - name: CLOUDSIGMA_IMPERSONATION_ENABLED
-          value: "true"
+        # Legacy credentials disabled by default
+        # To enable legacy fallback (not recommended):
+        # - name: CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS
+        #   value: "true"
 ```
 
 ## API Endpoints Reference
@@ -505,13 +513,13 @@ spec:
 
 1. **Per-region tokens**: Each region requires a separate impersonated token (handled automatically)
 2. **Token caching**: Tokens cached for 5 minutes before expiry, then refreshed
-3. **Fallback mode**: If impersonation fails or not configured, falls back to legacy credentials
+3. **No automatic fallback**: Legacy credentials must be explicitly enabled - no silent fallback to prevent VMs being created in wrong account
 
 ## Verified Working
 
 - ✅ VM creation in user's CloudSigma account (tested with `voa@shalb.com`)
 - ✅ Token caching and refresh
-- ✅ Fallback to legacy credentials
+- ✅ Legacy credentials (when explicitly enabled)
 - ✅ Automatic CloudSigmaCluster cleanup via OwnerReference
 - ✅ Dual infrastructure pattern (KubevirtCluster + CloudSigmaCluster)
 
