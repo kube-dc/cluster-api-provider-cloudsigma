@@ -41,14 +41,15 @@ type NodeReconciler struct {
 	TenantKubeconfig string
 	// ClusterName is the name of the cluster being managed
 	ClusterName string
-	// CloudSigma legacy credentials (fallback)
-	CloudSigmaUsername string
-	CloudSigmaPassword string
-	CloudSigmaRegion   string
-	// Impersonation config (preferred)
-	ImpersonationClient  *auth.ImpersonationClient
-	ImpersonationEnabled bool
-	UserEmail            string
+	// CloudSigma region
+	CloudSigmaRegion string
+	// Impersonation config (default mode)
+	ImpersonationClient *auth.ImpersonationClient
+	UserEmail           string
+	// Legacy credentials (must be explicitly enabled)
+	LegacyCredentialsEnabled bool
+	CloudSigmaUsername       string
+	CloudSigmaPassword       string
 
 	tenantClient     kubernetes.Interface
 	cloudsigmaClient *cloudsigma.Client
@@ -93,9 +94,9 @@ func (r *NodeReconciler) refreshCloudSigmaClient(ctx context.Context) error {
 	r.clientMutex.Lock()
 	defer r.clientMutex.Unlock()
 
-	if r.ImpersonationEnabled && r.ImpersonationClient != nil && r.UserEmail != "" {
-		// Use impersonation (preferred) - ImpersonationClient handles caching internally
-		klog.V(2).Infof("Refreshing CloudSigma client with impersonation for user: %s in region: %s", r.UserEmail, region)
+	// Use impersonation (default) if configured and userEmail is set
+	if r.ImpersonationClient != nil && r.UserEmail != "" {
+		klog.Infof("Refreshing CloudSigma client with impersonation for user: %s in region: %s", r.UserEmail, region)
 		token, err := r.ImpersonationClient.GetImpersonatedToken(ctx, r.UserEmail, region)
 		if err != nil {
 			return fmt.Errorf("failed to get impersonated token: %w", err)
@@ -103,16 +104,26 @@ func (r *NodeReconciler) refreshCloudSigmaClient(ctx context.Context) error {
 		cred := cloudsigma.NewTokenCredentialsProvider(token)
 		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
 		klog.V(2).Infof("CloudSigma client refreshed with impersonation for region: %s", region)
-	} else if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
-		// Legacy credentials - only create once
+		return nil
+	}
+
+	// Fallback to legacy credentials only if explicitly enabled
+	if r.LegacyCredentialsEnabled && r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
 		if r.cloudsigmaClient == nil {
-			klog.Info("Using legacy username/password credentials")
+			klog.Info("Using legacy username/password credentials (explicitly enabled)")
 			cred := cloudsigma.NewUsernamePasswordCredentialsProvider(r.CloudSigmaUsername, r.CloudSigmaPassword)
 			r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
 			klog.Infof("CloudSigma client initialized for region: %s", region)
 		}
-	} else if r.cloudsigmaClient == nil {
-		klog.Warning("No CloudSigma credentials provided, node addresses will not be updated")
+		return nil
+	}
+
+	// No valid auth method
+	if r.cloudsigmaClient == nil {
+		if r.ImpersonationClient != nil && r.UserEmail == "" {
+			return fmt.Errorf("impersonation configured but userEmail not set")
+		}
+		klog.Warning("No CloudSigma authentication available, node addresses will not be updated")
 	}
 
 	return nil

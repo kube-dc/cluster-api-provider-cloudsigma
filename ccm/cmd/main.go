@@ -35,30 +35,31 @@ func main() {
 	var probeAddr string
 	var clusterName string
 	var kubeconfig string
-	var cloudsigmaUsername string
-	var cloudsigmaPassword string
 	var cloudsigmaRegion string
-	// Impersonation config
-	var impersonationEnabled bool
+	// Impersonation config (default)
 	var oauthURL string
 	var clientID string
 	var clientSecret string
 	var userEmail string
+	// Legacy credentials (must be explicitly enabled)
+	var legacyCredentialsEnabled bool
+	var cloudsigmaUsername string
+	var cloudsigmaPassword string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&clusterName, "cluster-name", "", "Name of the cluster being managed.")
 	flag.StringVar(&kubeconfig, "tenant-kubeconfig", "", "Path to kubeconfig file for connecting to the tenant cluster.")
-	// Legacy credentials (fallback)
-	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username (legacy)")
-	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (legacy)")
 	flag.StringVar(&cloudsigmaRegion, "cloudsigma-region", os.Getenv("CLOUDSIGMA_REGION"), "CloudSigma region")
-	// Impersonation config (preferred)
-	flag.BoolVar(&impersonationEnabled, "impersonation-enabled", os.Getenv("CLOUDSIGMA_IMPERSONATION_ENABLED") == "true", "Enable OAuth impersonation")
+	// Impersonation config (default mode)
 	flag.StringVar(&oauthURL, "oauth-url", os.Getenv("CLOUDSIGMA_OAUTH_URL"), "CloudSigma OAuth URL")
 	flag.StringVar(&clientID, "client-id", os.Getenv("CLOUDSIGMA_CLIENT_ID"), "OAuth client ID")
 	flag.StringVar(&clientSecret, "client-secret", os.Getenv("CLOUDSIGMA_CLIENT_SECRET"), "OAuth client secret")
 	flag.StringVar(&userEmail, "user-email", os.Getenv("CLOUDSIGMA_USER_EMAIL"), "User email for impersonation")
+	// Legacy credentials (must be explicitly enabled)
+	flag.BoolVar(&legacyCredentialsEnabled, "enable-legacy-credentials", os.Getenv("CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS") == "true", "Enable legacy username/password authentication")
+	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username (only used with --enable-legacy-credentials)")
+	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (only used with --enable-legacy-credentials)")
 
 	flag.Parse()
 
@@ -111,10 +112,9 @@ func main() {
 		}
 	}()
 
-	// Create impersonation client if enabled
+	// Setup impersonation (default mode)
 	var impersonationClient *auth.ImpersonationClient
-	if impersonationEnabled && userEmail != "" {
-		klog.Infof("Impersonation enabled for user: %s", userEmail)
+	if oauthURL != "" && clientID != "" && clientSecret != "" {
 		var err error
 		impersonationClient, err = auth.NewImpersonationClient(auth.ImpersonationConfig{
 			OAuthURL:     oauthURL,
@@ -124,22 +124,41 @@ func main() {
 		if err != nil {
 			klog.Fatalf("Failed to create impersonation client: %v", err)
 		}
-	} else if impersonationEnabled && userEmail == "" {
-		klog.Warning("Impersonation enabled but user email not set, falling back to legacy credentials")
+		klog.Infof("Impersonation mode configured (default), userEmail: %s", userEmail)
 	} else {
-		klog.Info("Impersonation disabled, using legacy credentials")
+		klog.Info("Impersonation not configured - CLOUDSIGMA_OAUTH_URL, CLOUDSIGMA_CLIENT_ID, CLOUDSIGMA_CLIENT_SECRET required")
 	}
+
+	// Legacy credentials - only used when explicitly enabled
+	if legacyCredentialsEnabled {
+		if cloudsigmaUsername == "" || cloudsigmaPassword == "" {
+			klog.Fatal("Legacy credentials enabled but CLOUDSIGMA_USERNAME and CLOUDSIGMA_PASSWORD not set")
+		}
+		klog.Infof("Legacy credential fallback ENABLED (explicit), username: %s", cloudsigmaUsername)
+	} else {
+		// Clear legacy credentials when not explicitly enabled
+		cloudsigmaUsername = ""
+		cloudsigmaPassword = ""
+		klog.Info("Legacy credential fallback DISABLED (default)")
+	}
+
+	// Validate we have at least one auth method
+	if impersonationClient == nil && !legacyCredentialsEnabled {
+		klog.Fatal("No authentication configured. Set impersonation (CLOUDSIGMA_OAUTH_URL, CLOUDSIGMA_CLIENT_ID, CLOUDSIGMA_CLIENT_SECRET) or enable legacy credentials (CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true)")
+	}
+
+	klog.Infof("Starting CCM with impersonation=%v, legacyFallback=%v", impersonationClient != nil, legacyCredentialsEnabled)
 
 	// Create and start node reconciler
 	reconciler := &controllers.NodeReconciler{
-		TenantKubeconfig:      kubeconfig,
-		ClusterName:           clusterName,
-		CloudSigmaUsername:    cloudsigmaUsername,
-		CloudSigmaPassword:    cloudsigmaPassword,
-		CloudSigmaRegion:      cloudsigmaRegion,
-		ImpersonationClient:   impersonationClient,
-		ImpersonationEnabled:  impersonationEnabled,
-		UserEmail:             userEmail,
+		TenantKubeconfig:         kubeconfig,
+		ClusterName:              clusterName,
+		CloudSigmaUsername:       cloudsigmaUsername,
+		CloudSigmaPassword:       cloudsigmaPassword,
+		CloudSigmaRegion:         cloudsigmaRegion,
+		ImpersonationClient:      impersonationClient,
+		LegacyCredentialsEnabled: legacyCredentialsEnabled,
+		UserEmail:                userEmail,
 	}
 
 	if err := reconciler.Start(ctx); err != nil {
