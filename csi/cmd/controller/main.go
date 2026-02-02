@@ -30,17 +30,34 @@ func main() {
 	var region string
 	var cloudsigmaUsername string
 	var cloudsigmaPassword string
+	var cloudsigmaToken string
+	var tokenFile string
 
 	flag.StringVar(&endpoint, "endpoint", "unix:///csi/csi.sock", "CSI endpoint")
 	flag.StringVar(&region, "region", os.Getenv("CLOUDSIGMA_REGION"), "CloudSigma region")
-	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username")
-	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password")
+	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username (legacy)")
+	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (legacy)")
+	flag.StringVar(&cloudsigmaToken, "cloudsigma-token", os.Getenv("CLOUDSIGMA_ACCESS_TOKEN"), "CloudSigma API access token (recommended)")
+	flag.StringVar(&tokenFile, "token-file", os.Getenv("CLOUDSIGMA_TOKEN_FILE"), "Path to file containing access token (refreshed by CCM)")
 
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	if cloudsigmaUsername == "" || cloudsigmaPassword == "" {
-		klog.Fatal("CloudSigma credentials are required")
+	// Token-based auth takes priority
+	if cloudsigmaToken == "" && tokenFile != "" {
+		// Read token from file (CCM refreshes this)
+		data, err := os.ReadFile(tokenFile)
+		if err != nil {
+			klog.Warningf("Failed to read token file %s: %v", tokenFile, err)
+		} else {
+			cloudsigmaToken = string(data)
+			klog.Infof("Loaded access token from file: %s", tokenFile)
+		}
+	}
+
+	// Validate we have some auth method
+	if cloudsigmaToken == "" && (cloudsigmaUsername == "" || cloudsigmaPassword == "") {
+		klog.Fatal("CloudSigma credentials required: set CLOUDSIGMA_ACCESS_TOKEN or CLOUDSIGMA_USERNAME/CLOUDSIGMA_PASSWORD")
 	}
 
 	klog.Infof("Starting CloudSigma CSI Controller")
@@ -55,6 +72,8 @@ func main() {
 		Mode:               driver.ControllerMode,
 		CloudSigmaUsername: cloudsigmaUsername,
 		CloudSigmaPassword: cloudsigmaPassword,
+		CloudSigmaToken:    cloudsigmaToken,
+		TokenFile:          tokenFile,
 	}
 
 	drv, err := driver.NewDriver(cfg)

@@ -245,6 +245,11 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, node *corev1.Node) e
 	return nil
 }
 
+// GetTenantClient returns the tenant cluster Kubernetes client
+func (r *NodeReconciler) GetTenantClient() kubernetes.Interface {
+	return r.tenantClient
+}
+
 // hasIPAddress checks if the node has an InternalIP or ExternalIP address
 func (r *NodeReconciler) hasIPAddress(node *corev1.Node) bool {
 	for _, addr := range node.Status.Addresses {

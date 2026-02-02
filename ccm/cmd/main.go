@@ -45,6 +45,8 @@ func main() {
 	var legacyCredentialsEnabled bool
 	var cloudsigmaUsername string
 	var cloudsigmaPassword string
+	// CSI token provisioning
+	var csiTokenEnabled bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -60,6 +62,8 @@ func main() {
 	flag.BoolVar(&legacyCredentialsEnabled, "enable-legacy-credentials", os.Getenv("CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS") == "true", "Enable legacy username/password authentication")
 	flag.StringVar(&cloudsigmaUsername, "cloudsigma-username", os.Getenv("CLOUDSIGMA_USERNAME"), "CloudSigma API username (only used with --enable-legacy-credentials)")
 	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (only used with --enable-legacy-credentials)")
+	// CSI token provisioning
+	flag.BoolVar(&csiTokenEnabled, "enable-csi-token", os.Getenv("CLOUDSIGMA_ENABLE_CSI_TOKEN") == "true", "Enable CSI token provisioning - CCM will create and refresh CloudSigma API token for CSI driver")
 
 	flag.Parse()
 
@@ -147,7 +151,7 @@ func main() {
 		klog.Fatal("No authentication configured. Set impersonation (CLOUDSIGMA_OAUTH_URL, CLOUDSIGMA_CLIENT_ID, CLOUDSIGMA_CLIENT_SECRET) or enable legacy credentials (CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true)")
 	}
 
-	klog.Infof("Starting CCM with impersonation=%v, legacyFallback=%v", impersonationClient != nil, legacyCredentialsEnabled)
+	klog.Infof("Starting CCM with impersonation=%v, legacyFallback=%v, csiToken=%v", impersonationClient != nil, legacyCredentialsEnabled, csiTokenEnabled)
 
 	// Create and start node reconciler
 	reconciler := &controllers.NodeReconciler{
@@ -163,6 +167,29 @@ func main() {
 
 	if err := reconciler.Start(ctx); err != nil {
 		klog.Fatalf("Failed to start node reconciler: %v", err)
+	}
+
+	// Start CSI token controller if enabled
+	if csiTokenEnabled {
+		if impersonationClient == nil {
+			klog.Fatal("CSI token provisioning requires impersonation mode")
+		}
+		if userEmail == "" {
+			klog.Fatal("CSI token provisioning requires --user-email")
+		}
+
+		csiTokenController := &controllers.CSITokenController{
+			TenantClient:        reconciler.GetTenantClient(),
+			ImpersonationClient: impersonationClient,
+			UserEmail:           userEmail,
+			Region:              cloudsigmaRegion,
+			Enabled:             true,
+		}
+
+		if err := csiTokenController.Start(ctx); err != nil {
+			klog.Fatalf("Failed to start CSI token controller: %v", err)
+		}
+		klog.Infof("CSI token controller started for user: %s", userEmail)
 	}
 
 	// Wait for context cancellation

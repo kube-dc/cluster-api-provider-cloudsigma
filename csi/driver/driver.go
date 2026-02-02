@@ -90,6 +90,8 @@ type Config struct {
 
 	CloudSigmaUsername string
 	CloudSigmaPassword string
+	CloudSigmaToken    string // OAuth access token (preferred)
+	TokenFile          string // Path to token file (refreshed by CCM)
 }
 
 // NewDriver creates a new CloudSigma CSI driver
@@ -99,14 +101,21 @@ func NewDriver(cfg *Config) (*Driver, error) {
 
 	// Create CloudSigma client
 	var cloudClient *cloudsigma.Client
-	if cfg.CloudSigmaUsername != "" && cfg.CloudSigmaPassword != "" {
-		cred := cloudsigma.NewUsernamePasswordCredentialsProvider(cfg.CloudSigmaUsername, cfg.CloudSigmaPassword)
-		region := cfg.Region
-		if region == "" {
-			region = "zrh"
-		}
+	region := cfg.Region
+	if region == "" {
+		region = "zrh"
+	}
+
+	// Token-based auth takes priority (recommended for CCM-managed credentials)
+	if cfg.CloudSigmaToken != "" {
+		cred := cloudsigma.NewTokenCredentialsProvider(cfg.CloudSigmaToken)
 		cloudClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
-		klog.Infof("CloudSigma client initialized for region: %s", region)
+		klog.Infof("CloudSigma client initialized with token auth for region: %s", region)
+	} else if cfg.CloudSigmaUsername != "" && cfg.CloudSigmaPassword != "" {
+		// Legacy username/password auth
+		cred := cloudsigma.NewUsernamePasswordCredentialsProvider(cfg.CloudSigmaUsername, cfg.CloudSigmaPassword)
+		cloudClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
+		klog.Infof("CloudSigma client initialized with username/password auth for region: %s", region)
 	}
 
 	driver := &Driver{

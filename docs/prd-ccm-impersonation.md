@@ -248,6 +248,233 @@ data:
 2. **Fallback Behavior**: Should CCM fail or use legacy creds if impersonation fails?
    - Recommendation: Log error and continue with fallback
 
+---
+
+# CSI Token Provisioning
+
+## Overview
+
+Enable the CloudSigma CSI driver to authenticate with the CloudSigma API using CCM-provisioned OAuth tokens. The CCM obtains impersonated tokens and stores them in a tenant cluster secret for CSI consumption.
+
+**Status: IMPLEMENTED (Blocked by CloudSigma API)**
+
+## Problem Statement
+
+**Current State:**
+- CSI driver requires CloudSigma credentials to provision/attach volumes
+- Previously required manual credential creation in tenant clusters
+- CSI sidecar containers need Kubernetes API endpoint to communicate with K8s API
+
+**Desired State:**
+- CCM automatically provisions OAuth tokens for CSI driver
+- Tokens stored in tenant cluster secret (`cloudsigma-token`)
+- Tokens auto-refreshed by CCM before expiry
+- CSI sidecars use Sveltos-templated K8s API endpoint (like Cilium)
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         MANAGEMENT CLUSTER                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Namespace: cloudsigma-<cluster-namespace>                                   │
+│                                                                              │
+│  ┌─────────────────────┐    ┌─────────────────────┐                         │
+│  │ cloudsigma-         │    │ csccm-<cluster>     │                         │
+│  │ impersonation       │───▶│ (CCM Deployment)    │                         │
+│  │ Secret              │    │                     │                         │
+│  │ • client-id         │    │ CSI Token Controller│──────┐                  │
+│  │ • client-secret     │    │ --csi-token-enabled │      │                  │
+│  │ • oauth-url         │    └─────────────────────┘      │                  │
+│  └─────────────────────┘             │                   │                  │
+│                                      │ kubeconfig        │ Impersonation    │
+│  ┌─────────────────────┐             ▼                   │                  │
+│  │ Cluster CR          │    ┌─────────────────────┐      │                  │
+│  │ spec:               │    │ Tenant Cluster      │      │                  │
+│  │  controlPlaneEndpoint:   │ cloudsigma-csi ns   │      │                  │
+│  │   host: <external>  │───▶│ ┌─────────────────┐ │      │                  │
+│  │   port: 443         │    │ │cloudsigma-token │ │      │                  │
+│  └─────────────────────┘    │ │ • access_token  │ │      │                  │
+│                             │ │ • region        │ │      │                  │
+│                             │ │ • user_email    │ │      │                  │
+│                             │ └─────────────────┘ │      │                  │
+│                             └─────────────────────┘      │                  │
+└──────────────────────────────────────────────────────────┼──────────────────┘
+                                                           │
+                                                           ▼
+                                              ┌─────────────────────────┐
+                                              │ CloudSigma API          │
+                                              │ service_provider/       │
+                                              │ api/v1/user/impersonate │
+                                              └─────────────────────────┘
+```
+
+## Implementation Details
+
+### 1. CCM CSI Token Controller
+
+**File:** `ccm/controllers/csi_token_controller.go`
+
+**Status:** ✅ IMPLEMENTED
+
+The CSI Token Controller runs alongside the Node Controller in CCM:
+- Obtains impersonated OAuth token from CloudSigma
+- Creates/updates `cloudsigma-token` secret in tenant cluster
+- Refreshes token every 5 minutes (before 15min expiry)
+- Stores: `access_token`, `region`, `user_email`
+
+```go
+type CSITokenController struct {
+    TenantClient        kubernetes.Interface
+    ImpersonationClient *auth.ImpersonationClient
+    UserEmail           string
+    Region              string
+    Enabled             bool
+}
+```
+
+### 2. CSI Driver Token Consumption
+
+**File:** `csi/cmd/controller/main.go`
+
+**Status:** ✅ IMPLEMENTED
+
+CSI controller reads token from mounted secret:
+- `--token-file=/etc/cloudsigma/access_token` flag
+- Falls back to legacy credentials if token not available
+- Token refreshed by CCM, CSI re-reads on each API call
+
+### 3. Sveltos ConfigMap with Templating
+
+**File:** `kube-dc-k8-manager/config/addons/sveltos/cloudsigma-csi-configmap.yaml`
+
+**Status:** ✅ IMPLEMENTED
+
+**Key Fix:** Added `projectsveltos.io/template: "ok"` annotation to enable Sveltos template variable substitution.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudsigma-csi-template
+  namespace: projectsveltos
+  annotations:
+    projectsveltos.io/template: "ok"  # ← Required for templating!
+data:
+  cloudsigma-csi.yaml: |
+    # CSI sidecar containers use templated K8s API endpoint
+    - name: csi-provisioner
+      env:
+      - name: KUBERNETES_SERVICE_HOST
+        value: "{{ .Cluster.spec.controlPlaneEndpoint.host }}"
+      - name: KUBERNETES_SERVICE_PORT
+        value: "{{ .Cluster.spec.controlPlaneEndpoint.port }}"
+```
+
+### 4. ClusterProfile for CSI Deployment
+
+**File:** `kube-dc-k8-manager/config/addons/sveltos/cloudsigma-csi-clusterprofile.yaml`
+
+**Status:** ✅ IMPLEMENTED
+
+Deploys CSI to clusters with `csi: cloudsigma` label.
+
+## Files Modified
+
+### cluster-api-provider-cloudsigma
+
+| File | Changes | Status |
+|------|---------|--------|
+| `ccm/controllers/csi_token_controller.go` | New controller for token provisioning | ✅ |
+| `ccm/cmd/main.go` | Added `--csi-token-enabled` flag | ✅ |
+| `csi/cmd/controller/main.go` | Added `--token-file` flag support | ✅ |
+
+### kube-dc-k8-manager
+
+| File | Changes | Status |
+|------|---------|--------|
+| `config/addons/sveltos/cloudsigma-csi-configmap.yaml` | Added template annotation, K8s API env vars | ✅ |
+| `config/addons/sveltos/cloudsigma-csi-clusterprofile.yaml` | ClusterProfile for CSI deployment | ✅ |
+| `internal/controller/kdccluster_ccm.go` | Added `--csi-token-enabled` to CCM args | ✅ |
+
+### kube-dc (installer)
+
+| File | Changes | Status |
+|------|---------|--------|
+| `installer/kube-dc/templates/kube-dc/sveltos/cloudsigma-csi-configmap.yaml` | Copied from kube-dc-k8-manager | ✅ |
+| `installer/kube-dc/templates/kube-dc/sveltos/cloudsigma-csi-clusterprofile.yaml` | Copied from kube-dc-k8-manager | ✅ |
+
+## Docker Images
+
+| Image | Version | Status |
+|-------|---------|--------|
+| `shalb/cloudsigma-ccm` | `v0.1.0-csi-token-v3`, `latest` | ✅ Pushed |
+| `shalb/cloudsigma-csi-controller` | `latest` | ✅ Pushed |
+
+## Verification Results
+
+### Sveltos Templating
+
+**Status:** ✅ WORKING
+
+After adding `projectsveltos.io/template: "ok"` annotation, CSI sidecars correctly receive:
+```
+KUBERNETES_SERVICE_HOST: csi-test-cp-cloudsigma-tsap-183e269d.stage.kube-dc.com
+KUBERNETES_SERVICE_PORT: 443
+```
+
+### CCM Token Provisioning
+
+**Status:** ⏳ BLOCKED (CloudSigma API Issue)
+
+The CCM CSI Token Controller is implemented and deployed, but CloudSigma's service provider API is returning **504 Gateway Timeout**:
+
+```
+POST https://direct.next.cloudsigma.com/service_provider/api/v1/user/impersonate
+→ HTTP 504 (60s timeout)
+```
+
+**Impact:** CCM cannot create the `cloudsigma-token` secret in tenant clusters until CloudSigma resolves this API issue.
+
+**Ticket:** Reported to CloudSigma (Feb 2, 2025)
+
+## Testing Checklist
+
+| Test | Status |
+|------|--------|
+| Sveltos deploys CSI to clusters with `csi: cloudsigma` label | ✅ |
+| Sveltos templates K8s API endpoint correctly | ✅ |
+| CCM starts CSI Token Controller | ✅ |
+| CCM creates `cloudsigma-token` secret | ⏳ Blocked |
+| CSI controller reads token from secret | ⏳ Blocked |
+| PVC provisioning works | ⏳ Blocked |
+
+## Next Steps
+
+1. **Wait for CloudSigma** to fix the service_provider API timeout issue
+2. **Verify token creation** once API is responsive
+3. **Test PVC creation** end-to-end
+4. **Document** final verification results
+
+## Configuration
+
+### Enable CSI for a Cluster
+
+Add label to KdcCluster:
+```yaml
+metadata:
+  labels:
+    csi: cloudsigma
+```
+
+### CCM Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `CLOUDSIGMA_CSI_TOKEN_ENABLED` | Enable CSI token provisioning |
+| `CLOUDSIGMA_USER_EMAIL` | User to impersonate for CSI |
+| `CLOUDSIGMA_REGION` | CloudSigma region |
+
 ## References
 
 - [CAPCS Impersonation PRD](./prd-user-impersonation.md)
