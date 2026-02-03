@@ -39,6 +39,10 @@ const (
 	TokenRefreshInterval = 10 * time.Minute
 	// TokenRefreshBuffer is the time before expiry to refresh
 	TokenRefreshBuffer = 5 * time.Minute
+	// InitialRetryInterval is the starting interval for initial provisioning retries
+	InitialRetryInterval = 5 * time.Second
+	// MaxRetryInterval is the maximum interval between retries
+	MaxRetryInterval = 2 * time.Minute
 )
 
 // CSITokenController manages CloudSigma API tokens for the CSI driver
@@ -73,16 +77,45 @@ func (c *CSITokenController) Start(ctx context.Context) error {
 
 	klog.Infof("Starting CSI token controller for user: %s, region: %s", c.UserEmail, c.Region)
 
-	// Initial token provisioning
-	if err := c.ensureCSIToken(ctx); err != nil {
-		klog.Errorf("Initial CSI token provisioning failed: %v", err)
-		// Don't fail startup, will retry in loop
-	}
-
-	// Start refresh loop
-	go c.refreshLoop(ctx)
+	// Start provisioning loop with retry (non-blocking)
+	go c.provisioningLoop(ctx)
 
 	return nil
+}
+
+// provisioningLoop handles initial provisioning with exponential backoff,
+// then switches to regular refresh interval once successful
+func (c *CSITokenController) provisioningLoop(ctx context.Context) {
+	backoff := InitialRetryInterval
+	provisioned := false
+
+	for !provisioned {
+		select {
+		case <-ctx.Done():
+			klog.Info("CSI token provisioning loop stopped (context cancelled)")
+			return
+		default:
+			if err := c.ensureCSIToken(ctx); err != nil {
+				klog.Warningf("CSI token provisioning failed (retrying in %v): %v", backoff, err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+					// Exponential backoff with cap
+					backoff = backoff * 2
+					if backoff > MaxRetryInterval {
+						backoff = MaxRetryInterval
+					}
+				}
+				continue
+			}
+			klog.Info("CSI token provisioned successfully, starting refresh loop")
+			provisioned = true
+		}
+	}
+
+	// Once provisioned, switch to normal refresh interval
+	c.refreshLoop(ctx)
 }
 
 // refreshLoop periodically refreshes the CSI token
