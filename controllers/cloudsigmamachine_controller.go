@@ -230,13 +230,51 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 	var server *cloudsigma.Server
 	var err error
 	if cloudSigmaMachine.Status.InstanceID != "" {
-		log.V(4).Info("Checking existing server", "instanceID", cloudSigmaMachine.Status.InstanceID)
+		log.V(4).Info("Checking existing server", 
+			"instanceID", cloudSigmaMachine.Status.InstanceID,
+			"impersonatedUser", cloudClient.ImpersonatedUser())
 
 		// Verify server still exists in CloudSigma
 		server, err = cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
 		if err != nil {
-			log.Error(err, "Failed to get server")
-			return ctrl.Result{}, errors.Wrap(err, "failed to get server")
+			// Check if this is a permission denied error (403)
+			if cloud.IsPermissionDeniedError(err) {
+				log.Error(err, "Cannot access server - likely owned by different user or orphaned",
+					"instanceID", cloudSigmaMachine.Status.InstanceID,
+					"impersonatedUser", cloudClient.ImpersonatedUser())
+
+				// Try to find a server by name/metadata that we CAN access
+				machineUID := string(cloudSigmaMachine.UID)
+				existingServer, findErr := cloudClient.FindServerByNameOrMeta(ctx, cloudSigmaMachine.Name, machineUID)
+				if findErr == nil && existingServer != nil {
+					log.Info("Found accessible server with matching name/metadata, updating status",
+						"oldInstanceID", cloudSigmaMachine.Status.InstanceID,
+						"newInstanceID", existingServer.UUID,
+						"impersonatedUser", cloudClient.ImpersonatedUser())
+					cloudSigmaMachine.Status.InstanceID = existingServer.UUID
+					cloudSigmaMachine.Status.InstanceState = existingServer.Status
+					if updateErr := r.Status().Update(ctx, cloudSigmaMachine); updateErr != nil {
+						log.Error(updateErr, "Failed to update status with found server")
+						return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+					}
+					server = existingServer
+				} else {
+					// No accessible server found - clear the orphaned instance ID to trigger recreation
+					log.Info("No accessible server found - clearing orphaned instance ID to trigger recreation",
+						"orphanedInstanceID", cloudSigmaMachine.Status.InstanceID,
+						"impersonatedUser", cloudClient.ImpersonatedUser())
+					cloudSigmaMachine.Status.InstanceID = ""
+					cloudSigmaMachine.Status.InstanceState = ""
+					if updateErr := r.Status().Update(ctx, cloudSigmaMachine); updateErr != nil {
+						log.V(4).Info("Failed to clear orphaned status", "error", updateErr)
+					}
+					// Requeue to trigger creation
+					return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				}
+			} else {
+				log.Error(err, "Failed to get server", "instanceID", cloudSigmaMachine.Status.InstanceID)
+				return ctrl.Result{}, errors.Wrap(err, "failed to get server")
+			}
 		}
 
 		if server == nil {
@@ -319,7 +357,10 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 				return ctrl.Result{}, errors.Wrap(err, "failed to create server")
 			}
 
-			log.Info("Server created successfully", "instanceID", server.UUID)
+			log.Info("Server created successfully", 
+				"instanceID", server.UUID,
+				"name", cloudSigmaMachine.Name,
+				"impersonatedUser", cloudClient.ImpersonatedUser())
 
 			// Update status first (this is critical to prevent duplicates)
 			cloudSigmaMachine.Status.InstanceID = server.UUID
@@ -328,7 +369,10 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 				// If status update fails due to conflict, DON'T return error immediately
 				// Delay requeue to give CloudSigma API time to propagate the server
 				// so FindServerByNameOrMeta can find it on next reconcile
-				log.Error(err, "Failed to update status with instance ID, will retry after delay", "instanceID", server.UUID)
+				log.Error(err, "Failed to update status with instance ID, will retry after delay", 
+					"instanceID", server.UUID,
+					"machineName", cloudSigmaMachine.Name,
+					"impersonatedUser", cloudClient.ImpersonatedUser())
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 

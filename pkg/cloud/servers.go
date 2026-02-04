@@ -19,6 +19,7 @@ package cloud
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/cloudsigma/cloudsigma-sdk-go/cloudsigma"
 	"k8s.io/klog/v2"
@@ -180,17 +181,41 @@ func (c *Client) CreateServer(ctx context.Context, spec ServerSpec) (*cloudsigma
 }
 
 // GetServer retrieves a server by UUID
+// Returns nil, nil if server not found (404)
+// Returns PermissionDeniedError if user cannot access the server (403)
 func (c *Client) GetServer(ctx context.Context, uuid string) (*cloudsigma.Server, error) {
-	klog.V(4).Infof("Getting server: %s", uuid)
+	klog.V(4).Infof("Getting server: %s (impersonatedUser: %s)", uuid, c.impersonatedUser)
 
 	server, resp, err := c.sdk.Servers.Get(ctx, uuid)
 	if err != nil {
-		if resp != nil && resp.StatusCode == 404 {
-			return nil, nil // Server not found
+		errStr := err.Error()
+		
+		// Check HTTP status code from response (if available)
+		if resp != nil {
+			switch resp.StatusCode {
+			case 404:
+				klog.V(2).Infof("Server not found: %s", uuid)
+				return nil, nil
+			case 403:
+				klog.Warningf("Permission denied for server %s (user: %s) - server may be owned by different user", uuid, c.impersonatedUser)
+				return nil, NewPermissionDeniedError("server", uuid, 403, c.impersonatedUser, err)
+			}
 		}
+		
+		// Also check error message for status codes (SDK sometimes embeds them in the message)
+		if strings.Contains(errStr, "404") || strings.Contains(errStr, "not found") {
+			klog.V(2).Infof("Server not found (from error): %s", uuid)
+			return nil, nil
+		}
+		if strings.Contains(errStr, "403") || strings.Contains(errStr, "permission") {
+			klog.Warningf("Permission denied for server %s (user: %s, error: %s) - triggering self-healing", uuid, c.impersonatedUser, errStr)
+			return nil, NewPermissionDeniedError("server", uuid, 403, c.impersonatedUser, err)
+		}
+		
 		return nil, fmt.Errorf("failed to get server: %w", err)
 	}
 
+	klog.V(4).Infof("Got server: %s (status: %s, impersonatedUser: %s)", uuid, server.Status, c.impersonatedUser)
 	return server, nil
 }
 
