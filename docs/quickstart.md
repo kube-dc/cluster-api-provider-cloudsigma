@@ -79,7 +79,7 @@ Use the working Kubernetes-ready image:
 
 ```bash
 # Current tested image UUID (CloudSigma ZRH region)
-CLOUDSIGMA_IMAGE_UUID="569991f2-c96f-443c-88dd-72d1e53bf090"
+CLOUDSIGMA_IMAGE_UUID="4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"
 
 # This image includes:
 # - Ubuntu 24.04
@@ -119,7 +119,7 @@ spec:
     spec:
       cpu: 2000          # 2 GHz
       memory: 4096       # 4 GB
-      diskUUID: "569991f2-c96f-443c-88dd-72d1e53bf090"
+      diskUUID: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"
       nics:
         - ipv4Conf: dhcp  # Public NAT IP
 ---

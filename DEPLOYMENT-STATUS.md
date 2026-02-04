@@ -15,7 +15,7 @@
 
 
 ### **✅ Image Building**
-- **Working Image:** `569991f2-c96f-443c-88dd-72d1e53bf090`
+- **Working Image:** `4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79`
 - **OS:** Ubuntu 24.04.2 LTS
 - **Kubernetes:** 1.34.1
 - **Container Runtime:** containerd 1.7.28
@@ -203,7 +203,7 @@ cloudsigma-test-workers-98wtn-ntqzd   v1.34.1   Ubuntu 24.04.2   ✅
 - CPU: 2 GHz
 - Memory: 4 GB
 - Disk: 10 GB
-- Image: 569991f2-c96f-443c-88dd-72d1e53bf090
+- Image: 4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79
 - Networking: Public NAT IP
 - Kubernetes: v1.34.1
 
