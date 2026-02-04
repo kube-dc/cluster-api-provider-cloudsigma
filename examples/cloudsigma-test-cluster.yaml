@@ -8,7 +8,7 @@
 # Prerequisites:
 #   - multi-pool-test cluster exists
 #   - CloudSigma provider configured
-#   - Working image UUID: 569991f2-c96f-443c-88dd-72d1e53bf090
+#   - Working image UUID: 4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79
 #
 # Usage:
 #   kubectl apply -f cloudsigma-test-cluster.yaml
@@ -29,7 +29,7 @@ spec:
       cpu: 2000          # 2 GHz CPU
       memory: 4096       # 4 GB RAM
       disks:
-        - uuid: "569991f2-c96f-443c-88dd-72d1e53bf090"  # v4 FINAL - Working bootstrap
+        - uuid: "4afeb48e-3b2c-4f7e-ac8b-d9915ad69a79"  # v4 FINAL - Working bootstrap
           device: "virtio"
           boot_order: 1
           size: 10737418240  # 10 GB
