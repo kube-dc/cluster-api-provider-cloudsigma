@@ -141,3 +141,110 @@ func (c *Client) createServerDirect(ctx context.Context, server *CustomServer) (
 	klog.Infof("Server created successfully: %s (UUID: %s)", result.Objects[0].Name, result.Objects[0].UUID)
 	return &result.Objects[0], nil
 }
+
+// UpdateServerNIC updates a server's NIC configuration
+// This is used for IP failover - attaching/detaching static IPs
+type NICUpdateRequest struct {
+	NICs []CustomServerNIC `json:"nics"`
+}
+
+// UpdateServerNICs updates the NIC configuration for a server
+// The server must be stopped for NIC changes to take effect
+func (c *Client) UpdateServerNICs(ctx context.Context, serverUUID string, nics []CustomServerNIC) error {
+	klog.Infof("Updating NICs for server %s", serverUUID)
+
+	req := &NICUpdateRequest{
+		NICs: nics,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	klog.Infof("NIC update request body: %s", string(body))
+
+	apiEndpoint := c.apiEndpoint
+	if apiEndpoint == "" {
+		apiEndpoint = "https://next.cloudsigma.com/api/2.0"
+	}
+	url := fmt.Sprintf("%s/servers/%s/", apiEndpoint, serverUUID)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	if c.useImpersonation && c.accessToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.accessToken)
+	} else {
+		httpReq.SetBasicAuth(c.username, c.password)
+	}
+
+	httpClient := &http.Client{}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	klog.Infof("NICs updated successfully for server %s", serverUUID)
+	return nil
+}
+
+// AttachStaticIP attaches a static IP to a server's NIC
+// ipUUID is the IP address itself (e.g., "31.171.254.211")
+func (c *Client) AttachStaticIP(ctx context.Context, serverUUID, ipUUID string) error {
+	klog.Infof("Attaching static IP %s to server %s", ipUUID, serverUUID)
+
+	// Create NIC with static IP configuration
+	nics := []CustomServerNIC{
+		{
+			IPv4Conf: &CustomIPv4Conf{
+				Conf: "static",
+				IP: &CustomIPRef{
+					UUID: ipUUID,
+				},
+			},
+		},
+	}
+
+	return c.UpdateServerNICs(ctx, serverUUID, nics)
+}
+
+// DetachStaticIP removes a static IP from a server and switches to DHCP
+func (c *Client) DetachStaticIP(ctx context.Context, serverUUID string) error {
+	klog.Infof("Detaching static IP from server %s, switching to DHCP", serverUUID)
+
+	nics := []CustomServerNIC{
+		{
+			IPv4Conf: &CustomIPv4Conf{
+				Conf: "dhcp",
+			},
+		},
+	}
+
+	return c.UpdateServerNICs(ctx, serverUUID, nics)
+}
+
+// GetServerNICs retrieves the current NIC configuration for a server
+func (c *Client) GetServerNICs(ctx context.Context, serverUUID string) ([]cloudsigma.ServerNIC, error) {
+	server, _, err := c.sdk.Servers.Get(ctx, serverUUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get server: %w", err)
+	}
+	return server.NICs, nil
+}
+

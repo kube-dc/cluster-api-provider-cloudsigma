@@ -47,6 +47,8 @@ func main() {
 	var cloudsigmaPassword string
 	// CSI token provisioning
 	var csiTokenEnabled bool
+	// LoadBalancer IP failover (enabled by default)
+	var lbIPPoolDisabled bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -64,6 +66,8 @@ func main() {
 	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (only used with --enable-legacy-credentials)")
 	// CSI token provisioning
 	flag.BoolVar(&csiTokenEnabled, "enable-csi-token", os.Getenv("CLOUDSIGMA_ENABLE_CSI_TOKEN") == "true", "Enable CSI token provisioning - CCM will create and refresh CloudSigma API token for CSI driver")
+	// LoadBalancer IP failover (enabled by default, can be disabled)
+	flag.BoolVar(&lbIPPoolDisabled, "disable-lb-ip-pool", os.Getenv("CLOUDSIGMA_DISABLE_LB_IP_POOL") == "true", "Disable LoadBalancer IP pool management (enabled by default)")
 
 	flag.Parse()
 
@@ -151,7 +155,7 @@ func main() {
 		klog.Fatal("No authentication configured. Set impersonation (CLOUDSIGMA_OAUTH_URL, CLOUDSIGMA_CLIENT_ID, CLOUDSIGMA_CLIENT_SECRET) or enable legacy credentials (CLOUDSIGMA_ENABLE_LEGACY_CREDENTIALS=true)")
 	}
 
-	klog.Infof("Starting CCM with impersonation=%v, legacyFallback=%v, csiToken=%v", impersonationClient != nil, legacyCredentialsEnabled, csiTokenEnabled)
+	klog.Infof("Starting CCM with impersonation=%v, legacyFallback=%v, csiToken=%v, lbIPPool=%v", impersonationClient != nil, legacyCredentialsEnabled, csiTokenEnabled, !lbIPPoolDisabled)
 
 	// Create and start node reconciler
 	reconciler := &controllers.NodeReconciler{
@@ -190,6 +194,30 @@ func main() {
 			klog.Fatalf("Failed to start CSI token controller: %v", err)
 		}
 		klog.Infof("CSI token controller started for user: %s", userEmail)
+	}
+
+	// Start LoadBalancer IP pool controller (enabled by default)
+	// Requires impersonation mode for CloudSigma API access
+	if impersonationClient != nil && userEmail != "" && !lbIPPoolDisabled {
+		lbController := &controllers.LoadBalancerController{
+			TenantClient:        reconciler.GetTenantClient(),
+			ImpersonationClient: impersonationClient,
+			UserEmail:           userEmail,
+			Region:              cloudsigmaRegion,
+			ClusterName:         clusterName,
+			Disabled:            false,
+		}
+
+		if err := lbController.Start(ctx); err != nil {
+			klog.Errorf("Failed to start LoadBalancer controller: %v", err)
+			// Don't fatal - continue with other functionality
+		} else {
+			klog.Info("LoadBalancer IP pool controller started (auto-discovering owned IPs)")
+		}
+	} else if lbIPPoolDisabled {
+		klog.Info("LoadBalancer IP pool controller disabled via flag")
+	} else {
+		klog.Warning("LoadBalancer IP pool controller not started - requires impersonation mode and user-email")
 	}
 
 	// Wait for context cancellation
