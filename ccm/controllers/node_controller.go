@@ -285,28 +285,45 @@ func (r *NodeReconciler) getVMAddresses(ctx context.Context, vmUUID string) ([]c
 		})
 	}
 
-	// Get IP addresses by querying the IPs endpoint for IPs attached to this server
+	// Get IP addresses by listing IPs attached to this server
+	// Use the first IP found as the node's primary IP
 	ips, _, err := client.IPs.List(ctx)
 	if err != nil {
 		klog.Errorf("Failed to list IPs: %v", err)
 	} else {
+		klog.Infof("VM %s: Checking %d IPs for attachment", vmUUID, len(ips))
 		for _, ip := range ips {
+			// Log all IPs and their server attachments for debugging
+			serverUUID := ""
+			if ip.Server != nil {
+				serverUUID = ip.Server.UUID
+			}
+			if serverUUID != "" {
+				klog.V(2).Infof("IP %s attached to server %s (looking for %s)", ip.UUID, serverUUID, vmUUID)
+			}
+			
 			// Check if this IP is attached to our server
 			if ip.Server != nil && ip.Server.UUID == vmUUID {
 				ipAddr := ip.UUID
-				if ipAddr != "" {
-					// Determine if internal or external based on IP range
-					addrType := corev1.NodeExternalIP
-					if strings.HasPrefix(ipAddr, "10.") || strings.HasPrefix(ipAddr, "192.168.") || strings.HasPrefix(ipAddr, "172.") {
-						addrType = corev1.NodeInternalIP
-					}
-					addresses = append(addresses, corev1.NodeAddress{
-						Type:    addrType,
-						Address: ipAddr,
-					})
-					klog.V(2).Infof("Found IP %s (type: %s) for VM %s", ipAddr, addrType, vmUUID)
+				if ipAddr == "" {
+					continue
 				}
+				
+				// Use first IP attached to server as the node IP
+				addrType := corev1.NodeExternalIP
+				if strings.HasPrefix(ipAddr, "10.") || strings.HasPrefix(ipAddr, "192.168.") || strings.HasPrefix(ipAddr, "172.") {
+					addrType = corev1.NodeInternalIP
+				}
+				addresses = append(addresses, corev1.NodeAddress{
+					Type:    addrType,
+					Address: ipAddr,
+				})
+				klog.Infof("Found IP %s (type: %s) for VM %s", ipAddr, addrType, vmUUID)
+				break // Only use first IP
 			}
+		}
+		if len(addresses) == 1 { // Only hostname, no IP
+			klog.Warningf("VM %s: No IPs found attached to this server", vmUUID)
 		}
 	}
 
