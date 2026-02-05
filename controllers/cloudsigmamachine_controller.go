@@ -52,9 +52,10 @@ type CloudSigmaMachineReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// Legacy credential-based authentication (deprecated when impersonation is enabled)
-	CloudSigmaUsername string
-	CloudSigmaPassword string
+	// Legacy credential-based authentication (must be explicitly enabled)
+	LegacyCredentialsEnabled bool
+	CloudSigmaUsername       string
+	CloudSigmaPassword       string
 	CloudSigmaRegion   string
 
 	// Impersonation-based authentication (preferred)
@@ -125,7 +126,18 @@ func (r *CloudSigmaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Initialize the cloud client (with or without impersonation)
 	cloudClient, err := r.getCloudClient(ctx, cloudSigmaCluster)
 	if err != nil {
-		return ctrl.Result{}, errors.Wrap(err, "failed to create CloudSigma client")
+		isBeingDeleted := !cloudSigmaMachine.ObjectMeta.DeletionTimestamp.IsZero()
+		isProvisioned := cloudSigmaMachine.Status.InstanceID != "" && cloudSigmaMachine.Status.Ready
+
+		if isProvisioned && !isBeingDeleted {
+			// Already running machine with config issue (e.g. missing userEmail) - no action needed, check back later
+			log.V(2).Info("CloudSigma client unavailable for provisioned machine, will retry in 5m", "error", err)
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		}
+
+		// Machine needs API access (creating or deleting) - retry sooner
+		log.Error(err, "Failed to create CloudSigma client, will retry in 30s")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Handle deleted machines
@@ -163,7 +175,7 @@ func (r *CloudSigmaMachineReconciler) getCloudClient(ctx context.Context, cloudS
 	}
 
 	// Fallback to legacy credential-based authentication (only if explicitly enabled)
-	if r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
+	if r.LegacyCredentialsEnabled && r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
 		// Log why we're falling back to legacy mode for traceability
 		fallbackReason := "unknown"
 		if r.ImpersonationClient == nil {

@@ -18,6 +18,8 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -45,10 +47,11 @@ type CloudSigmaClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// Legacy credential-based authentication (deprecated when impersonation is enabled)
-	CloudSigmaUsername string
-	CloudSigmaPassword string
-	CloudSigmaRegion   string
+	// Legacy credential-based authentication (must be explicitly enabled)
+	LegacyCredentialsEnabled bool
+	CloudSigmaUsername       string
+	CloudSigmaPassword       string
+	CloudSigmaRegion         string
 
 	// Impersonation-based authentication (preferred)
 	ImpersonationClient *auth.ImpersonationClient
@@ -90,9 +93,11 @@ func (r *CloudSigmaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Initialize the cloud client
-	cloudClient, err := cloud.NewClient(r.CloudSigmaUsername, r.CloudSigmaPassword, r.CloudSigmaRegion)
+	cloudClient, err := r.getCloudClient(ctx, cloudSigmaCluster)
 	if err != nil {
-		return ctrl.Result{}, errors.Wrap(err, "failed to create CloudSigma client")
+		// Don't return error (causes exponential backoff). Requeue with fixed interval instead.
+		log.Error(err, "Failed to create CloudSigma client, will retry in 30s")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Handle deleted clusters
@@ -102,6 +107,39 @@ func (r *CloudSigmaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Handle non-deleted clusters
 	return r.reconcileNormal(ctx, cloudClient, cluster, cloudSigmaCluster)
+}
+
+// getCloudClient creates a CloudSigma client, using impersonation if configured
+func (r *CloudSigmaClusterReconciler) getCloudClient(ctx context.Context, cloudSigmaCluster *infrav1.CloudSigmaCluster) (*cloud.Client, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	region := r.CloudSigmaRegion
+	if cloudSigmaCluster != nil && cloudSigmaCluster.Spec.Region != "" {
+		region = cloudSigmaCluster.Spec.Region
+	}
+
+	// Get user email for impersonation
+	var userEmail string
+	if cloudSigmaCluster != nil && cloudSigmaCluster.Spec.UserEmail != "" {
+		userEmail = cloudSigmaCluster.Spec.UserEmail
+	}
+
+	// Use impersonation if available and user email is provided
+	if r.ImpersonationClient != nil && userEmail != "" {
+		log.Info("Using impersonation mode", "userEmail", userEmail, "region", region)
+		return cloud.NewClientWithImpersonation(ctx, r.ImpersonationClient, userEmail, region)
+	}
+
+	// Fallback to legacy credentials ONLY if explicitly enabled
+	if r.LegacyCredentialsEnabled && r.CloudSigmaUsername != "" && r.CloudSigmaPassword != "" {
+		log.Info("Using legacy credential mode (explicitly enabled)", "region", region, "username", r.CloudSigmaUsername)
+		return cloud.NewClient(r.CloudSigmaUsername, r.CloudSigmaPassword, region)
+	}
+
+	if r.ImpersonationClient != nil && userEmail == "" {
+		return nil, fmt.Errorf("impersonation configured but userEmail not set in CloudSigmaCluster spec")
+	}
+	return nil, fmt.Errorf("no CloudSigma authentication available")
 }
 
 func (r *CloudSigmaClusterReconciler) reconcileNormal(

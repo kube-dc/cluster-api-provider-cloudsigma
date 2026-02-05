@@ -150,24 +150,26 @@ func main() {
 	}
 
 	if err = (&controllers.CloudSigmaClusterReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		CloudSigmaUsername:  cloudsigmaUsername,
-		CloudSigmaPassword:  cloudsigmaPassword,
-		CloudSigmaRegion:    cloudsigmaRegion,
-		ImpersonationClient: impersonationClient,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		LegacyCredentialsEnabled: legacyCredentialsEnabled,
+		CloudSigmaUsername:       cloudsigmaUsername,
+		CloudSigmaPassword:       cloudsigmaPassword,
+		CloudSigmaRegion:         cloudsigmaRegion,
+		ImpersonationClient:      impersonationClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "CloudSigmaCluster")
 		os.Exit(1)
 	}
 
 	if err = (&controllers.CloudSigmaMachineReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		CloudSigmaUsername:  cloudsigmaUsername,
-		CloudSigmaPassword:  cloudsigmaPassword,
-		CloudSigmaRegion:    cloudsigmaRegion,
-		ImpersonationClient: impersonationClient,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		LegacyCredentialsEnabled: legacyCredentialsEnabled,
+		CloudSigmaUsername:       cloudsigmaUsername,
+		CloudSigmaPassword:       cloudsigmaPassword,
+		CloudSigmaRegion:         cloudsigmaRegion,
+		ImpersonationClient:      impersonationClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "CloudSigmaMachine")
 		os.Exit(1)

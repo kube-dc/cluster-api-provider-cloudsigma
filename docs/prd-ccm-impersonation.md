@@ -157,7 +157,7 @@ if r.ImpersonationEnabled && r.ImpersonationClient != nil && r.UserEmail != "" {
 ```
 
 **kube-dc-k8-manager kdccluster_ccm.go** - Deployment env vars:
-- Reads `kube-dc.com/owner-email` annotation from KdcCluster
+- Reads `cloudsigma.com/owner-email` annotation from KdcCluster
 - Reads region from CloudSigma worker pool config
 - Passes impersonation config via `cloudsigma-impersonation` secret
 
@@ -216,7 +216,7 @@ data:
    - Verify node addresses are updated
 
 3. **E2E Test**
-   - Create cluster with `kube-dc.com/owner-email` annotation
+   - Create cluster with `cloudsigma.com/owner-email` annotation
    - Verify CAPCS creates VM in user's account
    - Verify CCM queries VM and updates node
    - Verify node taint is removed

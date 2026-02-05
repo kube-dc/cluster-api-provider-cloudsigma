@@ -312,7 +312,7 @@ metadata:
   namespace: user-project
   annotations:
     # Set by BFF when creating cluster
-    kube-dc.com/owner-email: user@example.com
+    cloudsigma.com/owner-email: user@example.com
 spec:
   workers:
     - name: worker-pool-1
@@ -323,7 +323,7 @@ spec:
 **kube-dc-k8-manager reconcileCloudSigmaMachineTemplate:**
 ```go
 // Get owner email from KdcCluster annotation
-ownerEmail := cluster.Annotations["kube-dc.com/owner-email"]
+ownerEmail := cluster.Annotations["cloudsigma.com/owner-email"]
 
 // Pass to CloudSigmaCluster
 cloudSigmaCluster.Spec.UserEmail = ownerEmail
@@ -406,7 +406,7 @@ User (email: user@example.com) creates cluster via UI
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ cs-marketplace-partner BFF                                                   │
 │  1. Extract email from JWT: tokenPayload.email                              │
-│  2. Inject annotation: kube-dc.com/owner-email=user@example.com             │
+│  2. Inject annotation: cloudsigma.com/owner-email=user@example.com             │
 └─────────────────────────────────────────────────────────────────────────────┘
                     │
                     ▼
