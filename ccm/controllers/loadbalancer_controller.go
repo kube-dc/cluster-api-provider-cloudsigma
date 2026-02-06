@@ -45,8 +45,10 @@ const (
 	IPPoolDynamic = "dynamic"
 )
 
-// LoadBalancerController manages LoadBalancer service IPs by attaching/detaching
-// static and dynamic IPs to CloudSigma VMs (nodes) for IP failover
+// LoadBalancerController manages LoadBalancer service IPs using CloudSigma's
+// "manual" NIC mode. With manual mode, the cloud firewall allows traffic for
+// ALL subscribed IPs, so no per-IP NIC attachment is needed. The controller
+// only needs to configure IPs locally on nodes via privileged pods.
 type LoadBalancerController struct {
 	// TenantClient is the Kubernetes client for the tenant cluster
 	TenantClient kubernetes.Interface
@@ -82,6 +84,10 @@ type LoadBalancerController struct {
 	// serviceIPs tracks which service has which IP
 	// key: namespace/name, value: IP address
 	serviceIPs map[string]string
+
+	// manualModeNodes tracks which nodes have already been switched to manual NIC mode
+	// key: server UUID
+	manualModeNodes map[string]bool
 }
 
 // CloudSigmaIP represents an IP from the CloudSigma API
@@ -98,23 +104,6 @@ type CloudSigmaServer struct {
 	UUID string `json:"uuid"`
 }
 
-// CloudSigmaNIC represents a NIC configuration
-type CloudSigmaNIC struct {
-	MAC      string                 `json:"mac,omitempty"`
-	IPv4Conf *CloudSigmaIPv4Conf    `json:"ip_v4_conf,omitempty"`
-	VLAN     interface{}            `json:"vlan,omitempty"`
-}
-
-// CloudSigmaIPv4Conf represents IPv4 configuration
-type CloudSigmaIPv4Conf struct {
-	Conf string              `json:"conf"`
-	IP   *CloudSigmaIPRef    `json:"ip,omitempty"`
-}
-
-// CloudSigmaIPRef references an IP
-type CloudSigmaIPRef struct {
-	UUID string `json:"uuid"`
-}
 
 // Start initializes and starts the LoadBalancer controller
 func (c *LoadBalancerController) Start(ctx context.Context) error {
@@ -125,6 +114,7 @@ func (c *LoadBalancerController) Start(ctx context.Context) error {
 
 	c.ipAssignments = make(map[string]string)
 	c.serviceIPs = make(map[string]string)
+	c.manualModeNodes = make(map[string]bool)
 
 	// Discover owned IPs from CloudSigma API and recover state
 	if err := c.discoverOwnedIPs(ctx); err != nil {
@@ -297,26 +287,18 @@ func (c *LoadBalancerController) syncLoadBalancers(ctx context.Context) error {
 		}
 	}
 
-	// Cleanup deleted services - release IPs, detach NICs, and untag them
+	// Cleanup deleted services - release IPs and untag them
+	// Note: With manual NIC mode, no NIC detach is needed - the node's NIC stays in
+	// manual mode and simply allows all subscribed IPs. We just remove the local config.
 	c.mutex.Lock()
 	for svcKey, ip := range c.serviceIPs {
 		if !currentServices[svcKey] {
 			klog.Infof("Service %s deleted, releasing IP %s", svcKey, ip)
-			// Get server UUID before removing from map
-			serverUUID := c.ipAssignments[ip]
-			// Detach IP from server via CloudSigma API
-			if serverUUID != "" {
-				if err := c.detachIPFromServer(ctx, ip, serverUUID); err != nil {
-					klog.Warningf("Failed to detach IP %s from server %s: %v", ip, serverUUID, err)
-				} else {
-					klog.Infof("Detached IP %s from server %s", ip, serverUUID)
-				}
-			}
 			// Untag IP in CloudSigma
 			if err := c.untagIPInCloudSigma(ctx, ip); err != nil {
 				klog.Warningf("Failed to untag IP %s: %v", ip, err)
 			}
-			// Delete config pod
+			// Delete config pod (removes local IP + iptables rules)
 			c.deleteIPConfigPod(ctx, ip)
 			// Remove from assignments
 			delete(c.serviceIPs, svcKey)
@@ -409,12 +391,15 @@ func (c *LoadBalancerController) reconcileService(ctx context.Context, svc *core
 		return nil
 	}
 
-	// Attach IP to a healthy node
+	// Assign IP to a healthy node
 	if len(healthyNodes) > 0 {
 		nodeUUID := c.getNodeUUID(&healthyNodes[0])
 		if nodeUUID != "" {
-			if err := c.attachIPToServer(ctx, ip, nodeUUID); err != nil {
-				return fmt.Errorf("failed to attach IP %s to node: %w", ip, err)
+			// Ensure the node's NIC is in manual mode (one-time per node).
+			// Manual mode opens the CloudSigma firewall for ALL subscribed IPs,
+			// eliminating the need for per-IP NIC attachment.
+			if err := c.ensureNodeManualMode(ctx, nodeUUID); err != nil {
+				return fmt.Errorf("failed to switch node %s to manual NIC mode: %w", nodeUUID, err)
 			}
 
 			c.mutex.Lock()
@@ -482,21 +467,20 @@ func (c *LoadBalancerController) checkIPFailover(ctx context.Context, healthyNod
 				continue
 			}
 
-			// Detach from old server
-			if err := c.detachIPFromServer(ctx, ip, currentUUID); err != nil {
-				klog.Errorf("Failed to detach IP %s from %s: %v", ip, currentUUID, err)
-			}
-
-			// Delete old lb-ip pod
-			podName := fmt.Sprintf("lb-ip-%s", strings.ReplaceAll(ip, ".", "-"))
-			if err := c.TenantClient.CoreV1().Pods("kube-system").Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
-				klog.V(2).Infof("Failed to delete old lb-ip pod %s: %v", podName, err)
-			}
-
-			// Attach to new server
-			if err := c.attachIPToServer(ctx, ip, newUUID); err != nil {
-				klog.Errorf("Failed to attach IP %s to %s: %v", ip, newUUID, err)
+			// Ensure new node is in manual mode (allows all subscribed IPs)
+			if err := c.ensureNodeManualMode(ctx, newUUID); err != nil {
+				klog.Errorf("Failed to switch node %s to manual mode: %v", newUUID, err)
 				continue
+			}
+
+			// Force-delete old lb-ip pod with zero grace period to avoid race condition
+			// where the pod is still terminating when we try to create the new one
+			podName := fmt.Sprintf("lb-ip-%s", strings.ReplaceAll(ip, ".", "-"))
+			gracePeriod := int64(0)
+			if err := c.TenantClient.CoreV1().Pods("kube-system").Delete(ctx, podName, metav1.DeleteOptions{
+				GracePeriodSeconds: &gracePeriod,
+			}); err != nil {
+				klog.V(2).Infof("Failed to delete old lb-ip pod %s: %v", podName, err)
 			}
 
 			c.mutex.Lock()
@@ -620,9 +604,19 @@ func (c *LoadBalancerController) isIPAvailable(ctx context.Context, ip string) (
 	return ipInfo.Server == nil || ipInfo.Server.UUID == "", nil
 }
 
-// attachIPToServer attaches an IP to a server as a new NIC via CloudSigma API
-// This creates external routing for the IP to reach the node
-func (c *LoadBalancerController) attachIPToServer(ctx context.Context, ip, serverUUID string) error {
+// ensureNodeManualMode switches a server's NIC from dhcp/static to "manual" mode.
+// With manual mode, the CloudSigma cloud firewall allows traffic for ALL IPs owned
+// by the user (with subscription), eliminating the need for per-IP NIC attachment.
+// This is a one-time operation per node - once in manual mode, all subscribed IPs
+// can be used without further API calls.
+func (c *LoadBalancerController) ensureNodeManualMode(ctx context.Context, serverUUID string) error {
+	c.mutex.RLock()
+	if c.manualModeNodes[serverUUID] {
+		c.mutex.RUnlock()
+		return nil // Already switched
+	}
+	c.mutex.RUnlock()
+
 	token, err := c.ImpersonationClient.GetImpersonatedToken(ctx, c.UserEmail, c.Region)
 	if err != nil {
 		return fmt.Errorf("failed to get token: %w", err)
@@ -641,21 +635,58 @@ func (c *LoadBalancerController) attachIPToServer(ctx context.Context, ip, serve
 
 	var server map[string]interface{}
 	body, _ := io.ReadAll(resp.Body)
-	json.Unmarshal(body, &server)
-
-	// Get existing NICs
-	nics, _ := server["nics"].([]interface{})
-
-	// Add new NIC with the IP
-	newNIC := map[string]interface{}{
-		"ip_v4_conf": map[string]interface{}{
-			"conf": "static",
-			"ip": map[string]string{
-				"uuid": ip,
-			},
-		},
+	if err := json.Unmarshal(body, &server); err != nil {
+		return fmt.Errorf("failed to parse server: %w", err)
 	}
-	nics = append(nics, newNIC)
+
+	// Check if already in manual mode
+	nics, _ := server["nics"].([]interface{})
+	alreadyManual := false
+	for _, nic := range nics {
+		nicMap, ok := nic.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ipv4Conf, _ := nicMap["ip_v4_conf"].(map[string]interface{})
+		if ipv4Conf == nil {
+			continue
+		}
+		conf, _ := ipv4Conf["conf"].(string)
+		if conf == "manual" {
+			alreadyManual = true
+			break
+		}
+	}
+
+	if alreadyManual {
+		klog.V(2).Infof("Server %s NIC already in manual mode", serverUUID)
+		c.mutex.Lock()
+		c.manualModeNodes[serverUUID] = true
+		c.mutex.Unlock()
+		return nil
+	}
+
+	// Switch first public NIC (ip_v4_conf) from dhcp/static to manual
+	switched := false
+	for _, nic := range nics {
+		nicMap, ok := nic.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ipv4Conf, _ := nicMap["ip_v4_conf"].(map[string]interface{})
+		if ipv4Conf == nil {
+			continue
+		}
+		// Switch to manual mode - remove the specific IP binding
+		ipv4Conf["conf"] = "manual"
+		delete(ipv4Conf, "ip")
+		switched = true
+		break
+	}
+
+	if !switched {
+		return fmt.Errorf("no public NIC found on server %s to switch to manual mode", serverUUID)
+	}
 
 	// Update server - preserve all required fields including vnc_password
 	server["nics"] = nics
@@ -677,96 +708,20 @@ func (c *LoadBalancerController) attachIPToServer(ctx context.Context, ip, serve
 
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to update server: %w", err)
+		return fmt.Errorf("failed to update server NIC: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to attach IP: %s", string(respBody))
+		return fmt.Errorf("failed to switch NIC to manual mode: %s", string(respBody))
 	}
 
-	klog.Infof("Attached IP %s to server %s as new NIC", ip, serverUUID)
-	return nil
-}
+	c.mutex.Lock()
+	c.manualModeNodes[serverUUID] = true
+	c.mutex.Unlock()
 
-// detachIPFromServer removes an IP's NIC from a server via CloudSigma API
-func (c *LoadBalancerController) detachIPFromServer(ctx context.Context, ip, serverUUID string) error {
-	token, err := c.ImpersonationClient.GetImpersonatedToken(ctx, c.UserEmail, c.Region)
-	if err != nil {
-		return fmt.Errorf("failed to get token: %w", err)
-	}
-
-	// Get current server NICs
-	serverURL := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/servers/%s/", c.Region, serverUUID)
-	req, _ := http.NewRequestWithContext(ctx, "GET", serverURL, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to get server: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var server map[string]interface{}
-	body, _ := io.ReadAll(resp.Body)
-	json.Unmarshal(body, &server)
-
-	// Filter out the NIC with this IP
-	nics, _ := server["nics"].([]interface{})
-	var newNICs []interface{}
-	for _, nic := range nics {
-		nicMap, ok := nic.(map[string]interface{})
-		if !ok {
-			newNICs = append(newNICs, nic)
-			continue
-		}
-		ipv4Conf, _ := nicMap["ip_v4_conf"].(map[string]interface{})
-		if ipv4Conf == nil {
-			newNICs = append(newNICs, nic)
-			continue
-		}
-		ipInfo, _ := ipv4Conf["ip"].(map[string]interface{})
-		if ipInfo == nil {
-			newNICs = append(newNICs, nic)
-			continue
-		}
-		ipUUID, _ := ipInfo["uuid"].(string)
-		if ipUUID != ip {
-			newNICs = append(newNICs, nic)
-		}
-	}
-
-	// Update server - preserve all required fields including vnc_password
-	server["nics"] = newNICs
-	// Remove read-only fields that can't be sent in update
-	delete(server, "resource_uri")
-	delete(server, "runtime")
-	delete(server, "status")
-	delete(server, "uuid")
-	delete(server, "owner")
-	delete(server, "permissions")
-	delete(server, "mounted_on")
-	delete(server, "grantees")
-
-	updateBody, _ := json.Marshal(server)
-
-	req, _ = http.NewRequestWithContext(ctx, "PUT", serverURL, strings.NewReader(string(updateBody)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to update server: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to detach IP: %s", string(respBody))
-	}
-
-	klog.Infof("Detached IP %s from server %s", ip, serverUUID)
+	klog.Infof("Switched server %s NIC to manual mode (all subscribed IPs now allowed)", serverUUID)
 	return nil
 }
 
@@ -1027,7 +982,9 @@ func (c *LoadBalancerController) ensureIPConfigured(ctx context.Context, ip, ser
 	}
 }
 
-// configureIPOnNode adds the IP to the CloudSigma-attached NIC and sets up iptables rules
+// configureIPOnNode adds the IP locally on the node and sets up iptables rules.
+// With manual NIC mode, CloudSigma firewall already allows all subscribed IPs,
+// so we only need to configure the IP at the OS level + iptables DNAT.
 func (c *LoadBalancerController) configureIPOnNode(ctx context.Context, ip, serverUUID, clusterIP string, port int32) error {
 	// Find the node by its providerID
 	nodes, err := c.TenantClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -1055,10 +1012,9 @@ func (c *LoadBalancerController) configureIPOnNode(ctx context.Context, ip, serv
 	hostNetwork := true
 
 	// Script to:
-	// 1. IP is attached via CloudSigma API as NIC for external routing
-	// 2. Add IP to primary interface (CloudSigma NIC hotplug doesn't work)
-	// 3. Add iptables DNAT rules for external (PREROUTING) and local (OUTPUT) traffic
-	// 4. Add iptables MASQUERADE for return traffic
+	// 1. Add IP to primary interface (manual NIC mode allows all subscribed IPs at firewall level)
+	// 2. Add iptables DNAT rules for external (PREROUTING) and local (OUTPUT) traffic
+	// 3. Add iptables MASQUERADE for return traffic
 	configScript := fmt.Sprintf(`
 echo "Configuring LoadBalancer IP %s"
 
@@ -1067,7 +1023,7 @@ PRIMARY_IF=$(ip -o link show | grep -v -E 'lo:|cilium|lxc|veth' | head -1 | awk 
 echo "Primary interface: $PRIMARY_IF"
 
 # Add LoadBalancer IP to primary interface as secondary IP
-# CloudSigma attaches NIC via API but doesn't hotplug into running VM
+# NIC is in manual mode - CloudSigma firewall allows all subscribed IPs
 ip addr add %s/32 dev $PRIMARY_IF 2>/dev/null || echo "IP already configured on $PRIMARY_IF"
 
 # Add iptables DNAT rules for external traffic (PREROUTING)

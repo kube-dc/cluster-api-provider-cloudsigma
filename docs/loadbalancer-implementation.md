@@ -8,7 +8,7 @@ The CloudSigma CCM implements LoadBalancer services using a "floating IP" approa
 
 1. Discovers available IPs from CloudSigma (static IPs with subscription, dynamic IPs without)
 2. Allocates an IP to the service based on annotation (static by default, or dynamic)
-3. Attaches the IP to the target node as a NIC via CloudSigma API (for external routing)
+3. Switches the target node's NIC to "manual" mode (one-time, allows all subscribed IPs)
 4. Creates a privileged pod on the node to configure the IP locally and set up iptables rules
 5. Updates the service status with the external IP
 
@@ -22,8 +22,8 @@ The CloudSigma CCM implements LoadBalancer services using a "floating IP" approa
 │                   LoadBalancer IP                                │
 │                   (31.171.254.211)                               │
 │                          │                                       │
-│            CloudSigma routes to NIC                              │
-│            (attached via API)                                    │
+│            CloudSigma firewall allows IP                         │
+│            (NIC in "manual" mode)                                │
 │                          │                                       │
 │                          ▼                                       │
 │   ┌──────────────────────────────────────────────────────────┐  │
@@ -45,7 +45,7 @@ The CloudSigma CCM implements LoadBalancer services using a "floating IP" approa
 ### Components
 
 1. **LoadBalancer Controller** - Watches for LoadBalancer services and manages IP allocation
-2. **CloudSigma API** - Used for IP discovery AND NIC attachment/detachment
+2. **CloudSigma API** - Used for IP discovery and one-time NIC mode switch to "manual"
 3. **LB IP Config Pod** - Privileged pod that configures IP locally and sets up iptables rules on the node
 
 ## How It Works
@@ -70,25 +70,31 @@ When a LoadBalancer service is created:
 3. Creates a privileged pod on a healthy node to configure the IP
 4. Updates service status with the external IP
 
-### 3. CloudSigma NIC Attachment
+### 3. Manual NIC Mode
 
-Before configuring the IP locally, the CCM attaches the IP to the server as a new NIC via CloudSigma API:
+When the first LoadBalancer service is created on a node, the CCM switches the node's
+public NIC from `dhcp`/`static` to `manual` mode via CloudSigma API (one-time per node):
 
 ```bash
 # The CCM performs this via API:
 PUT /api/2.0/servers/{server-uuid}/
 {
   "nics": [
-    { existing NICs... },
-    { "ip_v4_conf": { "conf": "static", "ip": { "uuid": "<lb-ip>" } } }
+    { "ip_v4_conf": { "conf": "manual" } }
   ]
 }
 ```
 
+With `manual` mode, the CloudSigma cloud firewall allows traffic for **all IPs owned by
+the user** (IPs with subscription). This eliminates the need for per-IP NIC attachment.
+
+See: https://docs.cloudsigma.com/en/latest/network_interfaces.html
+
 **Important considerations:**
 - The full server object must be sent in the PUT request, preserving all fields including `vnc_password`
 - Read-only fields (`resource_uri`, `runtime`, `status`, `uuid`, `owner`, `permissions`, `mounted_on`, `grantees`) must be removed before sending
-- CloudSigma NIC attachment does NOT support hotplug - the new NIC won't appear in the OS without a VM restart
+- This is a one-time operation per node — once in manual mode, all subscribed IPs are allowed
+- The node keeps its existing IP (already configured by DHCP at OS level)
 
 ### 4. Node IP Configuration
 
@@ -100,11 +106,11 @@ The LB IP config pod (`lb-ip-<ip-address>`):
 - Configures iptables MASQUERADE for return traffic
 - Remains running to maintain the iptables rules
 
-**Why both NIC attachment AND local IP config?**
-- **NIC attachment via API**: CloudSigma's network uses this to route external traffic to the node
-- **Local IP on interface**: The kernel needs the IP configured locally to accept packets (hotplug workaround)
+**Why manual mode + local IP config?**
+- **Manual NIC mode**: Opens CloudSigma firewall for all subscribed IPs (external routing)
+- **Local IP on interface**: The kernel needs the IP configured locally to accept packets
 
-Without NIC attachment, CloudSigma won't route external traffic to the node.
+Without manual mode, CloudSigma firewall blocks traffic for IPs not assigned to the NIC.
 Without local IP config, the kernel will drop packets destined to the IP.
 
 ### 5. State Recovery
@@ -176,10 +182,12 @@ The implementation uses endpoint IPs (pod IPs) instead of ClusterIP for iptables
 
 When a node becomes unhealthy:
 1. CCM detects node failure via node controller
-2. Detaches IP from failed node via CloudSigma API
-3. Attaches IP to a healthy node
+2. Ensures the new target node's NIC is in manual mode (one-time)
+3. Deletes old LB IP config pod on the failed node
 4. Creates new LB IP config pod on the healthy node
 5. Service continues to work with the same external IP
+
+No per-IP NIC attachment/detachment is needed during failover.
 
 ## Cilium CNI Integration
 
@@ -261,7 +269,8 @@ iptables -t nat -L PREROUTING -n -v | grep "31.171.254.252"
 - TCP traffic only for iptables DNAT rules
 - First port in service spec is used for iptables rules
 - Requires privileged pods in kube-system namespace
-- External routing depends on CloudSigma infrastructure (NIC attachment alone may not be sufficient)
+- External routing depends on CloudSigma infrastructure (manual mode + subscribed IP required)
+- Switching NIC to manual mode removes the DHCP-assigned IP from CloudSigma's side (OS keeps it)
 
 ## Troubleshooting
 
