@@ -575,33 +575,58 @@ func (c *LoadBalancerController) allocateIP(ctx context.Context, svc *corev1.Ser
 	return "", nil
 }
 
-// isIPAvailable checks if an IP is available (not attached to any server)
+// isIPAvailable checks if an IP is available by looking at CloudSigma tags.
+// With manual NIC mode, IPs are not attached to servers, so we use service:* tags
+// to determine if an IP is already assigned to a LoadBalancer service.
 func (c *LoadBalancerController) isIPAvailable(ctx context.Context, ip string) (bool, error) {
-	token, err := c.ImpersonationClient.GetImpersonatedToken(ctx, c.UserEmail, c.Region)
+	taggedIPs, err := c.getTaggedServiceIPs(ctx)
 	if err != nil {
 		return false, err
 	}
+	_, inUse := taggedIPs[ip]
+	return !inUse, nil
+}
 
-	url := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/ips/%s/", c.Region, ip)
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+// getTaggedServiceIPs returns a map of IPs that have service:* tags (i.e., assigned to LB services).
+// This is used to check IP availability since IPs are no longer attached to servers with manual NIC mode.
+func (c *LoadBalancerController) getTaggedServiceIPs(ctx context.Context) (map[string]string, error) {
+	token, err := c.ImpersonationClient.GetImpersonatedToken(ctx, c.UserEmail, c.Region)
+	if err != nil {
+		return nil, err
+	}
+
+	listURL := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/tags/", c.Region)
+	req, _ := http.NewRequestWithContext(ctx, "GET", listURL, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	var ipInfo struct {
-		Server *struct {
-			UUID string `json:"uuid"`
-		} `json:"server"`
+	var tagList struct {
+		Objects []struct {
+			UUID      string `json:"uuid"`
+			Name      string `json:"name"`
+			Resources []struct {
+				UUID string `json:"uuid"`
+			} `json:"resources"`
+		} `json:"objects"`
 	}
 	body, _ := io.ReadAll(resp.Body)
-	json.Unmarshal(body, &ipInfo)
+	json.Unmarshal(body, &tagList)
 
-	// IP is available if not attached to any server
-	return ipInfo.Server == nil || ipInfo.Server.UUID == "", nil
+	// Build map: IP -> service tag name (for IPs that have service:* tags)
+	result := make(map[string]string)
+	for _, tag := range tagList.Objects {
+		if strings.HasPrefix(tag.Name, "service:") {
+			for _, r := range tag.Resources {
+				result[r.UUID] = tag.Name
+			}
+		}
+	}
+	return result, nil
 }
 
 // ensureNodeManualMode switches a server's NIC from dhcp/static to "manual" mode.
@@ -725,28 +750,107 @@ func (c *LoadBalancerController) ensureNodeManualMode(ctx context.Context, serve
 	return nil
 }
 
-// tagIPInCloudSigma adds tags to an IP in CloudSigma to track which cluster/service is using it
-// CloudSigma tags are separate resources - we create tags and add the IP to them
+// tagIPInCloudSigma adds tags to an IP in CloudSigma to track which cluster/service is using it.
+// It also cleans stale tags from the IP (e.g., old service:* or cluster:* tags from previous assignments).
 func (c *LoadBalancerController) tagIPInCloudSigma(ctx context.Context, ip, serviceName string) error {
 	token, err := c.ImpersonationClient.GetImpersonatedToken(ctx, c.UserEmail, c.Region)
 	if err != nil {
 		return fmt.Errorf("failed to get token for IP tagging: %w", err)
 	}
 
-	// Tag names to create/update
-	tagNames := []string{
-		fmt.Sprintf("cluster:%s", c.ClusterName),
-		fmt.Sprintf("service:%s", strings.ReplaceAll(serviceName, "/", "-")),
-		"managed-by:cloudsigma-ccm",
+	// Desired tags for this IP
+	desiredTags := map[string]bool{
+		fmt.Sprintf("cluster:%s", c.ClusterName):                                true,
+		fmt.Sprintf("service:%s", strings.ReplaceAll(serviceName, "/", "-")):     true,
+		"managed-by:cloudsigma-ccm":                                             true,
 	}
 
-	for _, tagName := range tagNames {
+	// Clean stale tags: remove this IP from any CCM-managed tags that don't match current assignment
+	if err := c.cleanStaleTags(ctx, token, ip, desiredTags); err != nil {
+		klog.Warningf("Failed to clean stale tags from IP %s: %v", ip, err)
+	}
+
+	// Add IP to desired tags
+	for tagName := range desiredTags {
 		if err := c.ensureTagWithIP(ctx, token, tagName, ip); err != nil {
 			klog.Warningf("Failed to add IP %s to tag %s: %v", ip, tagName, err)
 		}
 	}
 
 	klog.Infof("Tagged IP %s with cluster=%s, service=%s", ip, c.ClusterName, serviceName)
+	return nil
+}
+
+// cleanStaleTags removes an IP from any CCM-managed tags (cluster:*, service:*, managed-by:*)
+// that are NOT in the desiredTags set. This cleans up stale tags from previous assignments.
+func (c *LoadBalancerController) cleanStaleTags(ctx context.Context, token, ip string, desiredTags map[string]bool) error {
+	listURL := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/tags/", c.Region)
+	req, _ := http.NewRequestWithContext(ctx, "GET", listURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to list tags: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var tagList struct {
+		Objects []struct {
+			UUID      string `json:"uuid"`
+			Name      string `json:"name"`
+			Resources []struct {
+				UUID string `json:"uuid"`
+			} `json:"resources"`
+		} `json:"objects"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	json.Unmarshal(body, &tagList)
+
+	for _, tag := range tagList.Objects {
+		// Only process CCM-managed tags
+		if !strings.HasPrefix(tag.Name, "cluster:") &&
+			!strings.HasPrefix(tag.Name, "service:") &&
+			tag.Name != "managed-by:cloudsigma-ccm" {
+			continue
+		}
+
+		// Skip tags that are in the desired set
+		if desiredTags[tag.Name] {
+			continue
+		}
+
+		// Check if this stale tag contains our IP
+		var newResources []string
+		found := false
+		for _, r := range tag.Resources {
+			if r.UUID == ip {
+				found = true
+			} else {
+				newResources = append(newResources, r.UUID)
+			}
+		}
+
+		if found {
+			// Remove IP from this stale tag
+			updateURL := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/tags/%s/", c.Region, tag.UUID)
+			payload := map[string]interface{}{
+				"name":      tag.Name,
+				"resources": newResources,
+			}
+			body, _ := json.Marshal(payload)
+			req, _ := http.NewRequestWithContext(ctx, "PUT", updateURL, strings.NewReader(string(body)))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				klog.Warningf("Failed to remove IP %s from stale tag %s: %v", ip, tag.Name, err)
+				continue
+			}
+			resp.Body.Close()
+			klog.Infof("Cleaned stale tag %s from IP %s", tag.Name, ip)
+		}
+	}
 	return nil
 }
 
