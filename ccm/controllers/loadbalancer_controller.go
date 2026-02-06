@@ -831,13 +831,18 @@ func (c *LoadBalancerController) cleanStaleTags(ctx context.Context, token, ip s
 		}
 
 		if found {
-			// Remove IP from this stale tag
+			// Remove IP from this stale tag - use resource objects format [{"uuid": "..."}]
 			updateURL := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/tags/%s/", c.Region, tag.UUID)
+			resourceObjects := make([]map[string]string, 0, len(newResources))
+			for _, uuid := range newResources {
+				resourceObjects = append(resourceObjects, map[string]string{"uuid": uuid})
+			}
 			payload := map[string]interface{}{
 				"name":      tag.Name,
-				"resources": newResources,
+				"resources": resourceObjects,
 			}
 			body, _ := json.Marshal(payload)
+			klog.V(4).Infof("Cleaning stale tag %s: PUT %s body=%s", tag.Name, updateURL, string(body))
 			req, _ := http.NewRequestWithContext(ctx, "PUT", updateURL, strings.NewReader(string(body)))
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("Content-Type", "application/json")
@@ -847,8 +852,13 @@ func (c *LoadBalancerController) cleanStaleTags(ctx context.Context, token, ip s
 				klog.Warningf("Failed to remove IP %s from stale tag %s: %v", ip, tag.Name, err)
 				continue
 			}
+			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			klog.Infof("Cleaned stale tag %s from IP %s", tag.Name, ip)
+			if resp.StatusCode >= 400 {
+				klog.Warningf("Failed to clean stale tag %s from IP %s: HTTP %d: %s", tag.Name, ip, resp.StatusCode, string(respBody))
+			} else {
+				klog.Infof("Cleaned stale tag %s from IP %s (HTTP %d)", tag.Name, ip, resp.StatusCode)
+			}
 		}
 	}
 	return nil
@@ -928,12 +938,16 @@ func (c *LoadBalancerController) ensureTagWithIP(ctx context.Context, token, tag
 			}
 		}
 
-		// Update existing tag to add the IP
+		// Update existing tag to add the IP - use resource objects format [{"uuid": "..."}]
 		updateURL := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/tags/%s/", c.Region, tagUUID)
-		newResources := append(existingResourceUUIDs, ip)
+		allUUIDs := append(existingResourceUUIDs, ip)
+		resourceObjects := make([]map[string]string, 0, len(allUUIDs))
+		for _, uuid := range allUUIDs {
+			resourceObjects = append(resourceObjects, map[string]string{"uuid": uuid})
+		}
 		payload := map[string]interface{}{
 			"name":      tagName,
-			"resources": newResources,
+			"resources": resourceObjects,
 		}
 		body, _ := json.Marshal(payload)
 		req, _ := http.NewRequestWithContext(ctx, "PUT", updateURL, strings.NewReader(string(body)))
@@ -1007,11 +1021,15 @@ func (c *LoadBalancerController) untagIPInCloudSigma(ctx context.Context, ip str
 		}
 
 		if found {
-			// Update tag to remove the IP
+			// Update tag to remove the IP - use resource objects format [{"uuid": "..."}]
 			updateURL := fmt.Sprintf("https://%s.cloudsigma.com/api/2.0/tags/%s/", c.Region, tag.UUID)
+			resourceObjects := make([]map[string]string, 0, len(newResources))
+			for _, uuid := range newResources {
+				resourceObjects = append(resourceObjects, map[string]string{"uuid": uuid})
+			}
 			payload := map[string]interface{}{
 				"name":      tag.Name,
-				"resources": newResources,
+				"resources": resourceObjects,
 			}
 			body, _ := json.Marshal(payload)
 			req, _ := http.NewRequestWithContext(ctx, "PUT", updateURL, strings.NewReader(string(body)))
