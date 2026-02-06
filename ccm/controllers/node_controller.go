@@ -51,9 +51,10 @@ type NodeReconciler struct {
 	CloudSigmaUsername       string
 	CloudSigmaPassword       string
 
-	tenantClient     kubernetes.Interface
-	cloudsigmaClient *cloudsigma.Client
-	clientMutex      sync.RWMutex
+	tenantClient       kubernetes.Interface
+	cloudsigmaClient   *cloudsigma.Client
+	clientMutex        sync.RWMutex
+	staleNodeFailures  map[string]int // tracks consecutive 403 failures per node
 }
 
 // Start initializes the tenant client and starts the node sync loop
@@ -207,6 +208,12 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, node *corev1.Node) e
 		addresses, err := r.getVMAddresses(ctx, vmUUID)
 		if err != nil {
 			klog.Errorf("Failed to get VM addresses for %s: %v", vmUUID, err)
+
+			// Detect permission denied (403) - VM owned by a different user = stale node
+			errStr := err.Error()
+			if strings.Contains(errStr, "403") || strings.Contains(errStr, "permission") {
+				return r.handleStaleNode(ctx, node, vmUUID, err)
+			}
 		} else if len(addresses) > 0 {
 			nodeCopy.Status.Addresses = addresses
 			klog.Infof("Setting addresses for node %s: %v", node.Name, addresses)
@@ -242,6 +249,44 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, node *corev1.Node) e
 		klog.Infof("Updated addresses for node %s", node.Name)
 	}
 
+	return nil
+}
+
+// handleStaleNode deletes a node from the tenant cluster when its VM is inaccessible (403).
+// This happens when old VMs from a previous cluster (owned by a different user) re-register
+// with the new cluster's API server via stale etcd data.
+func (r *NodeReconciler) handleStaleNode(ctx context.Context, node *corev1.Node, vmUUID string, apiErr error) error {
+	// Track consecutive failures per node to avoid deleting on transient errors
+	r.clientMutex.Lock()
+	if r.staleNodeFailures == nil {
+		r.staleNodeFailures = make(map[string]int)
+	}
+	r.staleNodeFailures[node.Name]++
+	failCount := r.staleNodeFailures[node.Name]
+	r.clientMutex.Unlock()
+
+	// Require 3 consecutive failures before deleting (covers ~90s with 30s sync interval)
+	if failCount < 3 {
+		klog.Warningf("Node %s: VM %s returned permission denied (%d/3 before deletion): %v",
+			node.Name, vmUUID, failCount, apiErr)
+		return nil
+	}
+
+	klog.Warningf("Deleting stale node %s: VM %s is not accessible by current user (owned by different account) - "+
+		"this node likely belongs to a previously deleted cluster", node.Name, vmUUID)
+
+	if err := r.tenantClient.CoreV1().Nodes().Delete(ctx, node.Name, metav1.DeleteOptions{}); err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete stale node %s: %w", node.Name, err)
+		}
+	}
+
+	// Clean up tracking
+	r.clientMutex.Lock()
+	delete(r.staleNodeFailures, node.Name)
+	r.clientMutex.Unlock()
+
+	klog.Infof("Deleted stale node %s (VM %s owned by different user)", node.Name, vmUUID)
 	return nil
 }
 

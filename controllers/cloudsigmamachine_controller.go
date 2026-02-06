@@ -492,6 +492,19 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 		// Check if server still exists in CloudSigma
 		server, err := cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
 		if err != nil {
+			// If permission denied (403), the VM is owned by a different user.
+			// This happens when a cluster was previously created with different credentials.
+			// We cannot manage this VM - log warning and proceed to remove finalizer
+			// so the machine object can be deleted (the orphaned VM must be cleaned up manually).
+			if cloud.IsPermissionDeniedError(err) {
+				log.Info("WARNING: Permission denied accessing server - VM owned by different user, removing finalizer (orphaned VM must be cleaned manually)",
+					"instanceID", cloudSigmaMachine.Status.InstanceID, "error", err)
+				controllerutil.RemoveFinalizer(cloudSigmaMachine, CloudSigmaMachineFinalizer)
+				if updateErr := r.Update(ctx, cloudSigmaMachine); updateErr != nil {
+					return ctrl.Result{}, errors.Wrap(updateErr, "failed to remove finalizer after permission denied")
+				}
+				return ctrl.Result{}, nil
+			}
 			log.Error(err, "Failed to get server for deletion", "instanceID", cloudSigmaMachine.Status.InstanceID)
 			return ctrl.Result{}, errors.Wrap(err, "failed to get server for deletion")
 		}

@@ -243,6 +243,8 @@ func (c *LoadBalancerController) syncLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			klog.Info("LoadBalancer sync loop stopping, cleaning up IP tags...")
+			c.cleanupAllIPTags()
 			klog.Info("LoadBalancer sync loop stopped")
 			return
 		case <-ipRefreshTicker.C:
@@ -968,6 +970,35 @@ func (c *LoadBalancerController) ensureTagWithIP(ctx context.Context, token, tag
 	}
 
 	return nil
+}
+
+// cleanupAllIPTags removes all CCM-managed tags from IPs tracked by this controller.
+// Called during shutdown to ensure IPs are released for reuse by new clusters.
+func (c *LoadBalancerController) cleanupAllIPTags() {
+	// Use a fresh context with timeout since the parent context is cancelled
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	c.mutex.Lock()
+	ipsToClean := make(map[string]string) // ip -> svcKey
+	for svcKey, ip := range c.serviceIPs {
+		ipsToClean[ip] = svcKey
+	}
+	c.mutex.Unlock()
+
+	if len(ipsToClean) == 0 {
+		klog.Info("No LB IPs to clean up on shutdown")
+		return
+	}
+
+	klog.Infof("Cleaning up %d LB IP tags on shutdown", len(ipsToClean))
+	for ip, svcKey := range ipsToClean {
+		if err := c.untagIPInCloudSigma(ctx, ip); err != nil {
+			klog.Warningf("Failed to untag IP %s (service %s) on shutdown: %v", ip, svcKey, err)
+		} else {
+			klog.Infof("Cleaned up tags for IP %s (service %s) on shutdown", ip, svcKey)
+		}
+	}
 }
 
 // untagIPInCloudSigma removes an IP from CCM-managed tags in CloudSigma when it's released
