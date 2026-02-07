@@ -1192,6 +1192,11 @@ echo "Primary interface: $PRIMARY_IF"
 # NIC is in manual mode - CloudSigma firewall allows all subscribed IPs
 ip addr add %s/32 dev $PRIMARY_IF 2>/dev/null || echo "IP already configured on $PRIMARY_IF"
 
+# Send gratuitous ARP to update upstream router/switch MAC table
+# Critical for failover: without GARP, traffic still routes to old node's MAC
+arping -U -c 3 -I $PRIMARY_IF %s 2>/dev/null &
+arping -A -c 3 -I $PRIMARY_IF %s 2>/dev/null &
+
 # Add iptables DNAT rules for external traffic (PREROUTING)
 iptables -t nat -C PREROUTING -d %s -p tcp --dport %d -j DNAT --to-destination %s:%d 2>/dev/null || \
   iptables -t nat -I PREROUTING 1 -d %s -p tcp --dport %d -j DNAT --to-destination %s:%d
@@ -1207,7 +1212,7 @@ iptables -t nat -C POSTROUTING -d %s -p tcp --dport %d -j MASQUERADE 2>/dev/null
 echo "Configured LoadBalancer IP %s on $PRIMARY_IF with DNAT to %s:%d"
 # Keep running to maintain the iptables rules
 while true; do sleep 3600; done
-`, ip, ip, ip, port, clusterIP, port, ip, port, clusterIP, port, ip, port, clusterIP, port, ip, port, clusterIP, port, clusterIP, port, clusterIP, port, ip, clusterIP, port)
+`, ip, ip, ip, ip, ip, port, clusterIP, port, ip, port, clusterIP, port, ip, port, clusterIP, port, ip, port, clusterIP, port, clusterIP, port, clusterIP, port, ip, clusterIP, port)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
