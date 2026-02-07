@@ -381,6 +381,11 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 				"name", cloudSigmaMachine.Name,
 				"impersonatedUser", cloudClient.ImpersonatedUser())
 
+			// Tag the server in CloudSigma for tracking
+			clusterName := cloudSigmaMachine.Labels["cluster.x-k8s.io/cluster-name"]
+			poolName := cloudSigmaMachine.Labels["cluster.x-k8s.io/deployment-name"]
+			cloudClient.TagServer(ctx, server.UUID, clusterName, poolName)
+
 			// Update status first (this is critical to prevent duplicates)
 			cloudSigmaMachine.Status.InstanceID = server.UUID
 			cloudSigmaMachine.Status.InstanceState = server.Status
@@ -500,6 +505,9 @@ func (r *CloudSigmaMachineReconciler) reconcileDelete(
 
 	if cloudSigmaMachine.Status.InstanceID != "" {
 		log.Info("Deleting server", "instanceID", cloudSigmaMachine.Status.InstanceID)
+
+		// Untag the server before deletion
+		cloudClient.UntagServer(ctx, cloudSigmaMachine.Status.InstanceID)
 
 		// Check if server still exists in CloudSigma
 		server, err := cloudClient.GetServer(ctx, cloudSigmaMachine.Status.InstanceID)
