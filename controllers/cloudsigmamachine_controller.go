@@ -259,7 +259,7 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 				machineUID := string(cloudSigmaMachine.UID)
 				existingServer, findErr := cloudClient.FindServerByNameOrMeta(ctx, cloudSigmaMachine.Name, machineUID)
 				if findErr == nil && existingServer != nil {
-					log.Info("Found accessible server with matching name/metadata, updating status",
+					log.Info("Found accessible server with matching name/metadata, updating status and providerID",
 						"oldInstanceID", cloudSigmaMachine.Status.InstanceID,
 						"newInstanceID", existingServer.UUID,
 						"impersonatedUser", cloudClient.ImpersonatedUser())
@@ -267,6 +267,13 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 					cloudSigmaMachine.Status.InstanceState = existingServer.Status
 					if updateErr := r.Status().Update(ctx, cloudSigmaMachine); updateErr != nil {
 						log.Error(updateErr, "Failed to update status with found server")
+						return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+					}
+					// Also update providerID in spec to match the new instance
+					newProviderID := fmt.Sprintf("cloudsigma://%s", existingServer.UUID)
+					cloudSigmaMachine.Spec.ProviderID = &newProviderID
+					if updateErr := r.Update(ctx, cloudSigmaMachine); updateErr != nil {
+						log.Error(updateErr, "Failed to update providerID with found server")
 						return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 					}
 					server = existingServer
@@ -414,15 +421,20 @@ func (r *CloudSigmaMachineReconciler) reconcileNormal(
 	if server != nil {
 		cloudSigmaMachine.Status.InstanceState = server.Status
 
-		// Ensure providerID is set in spec (required for Machine to transition to Running)
-		if cloudSigmaMachine.Spec.ProviderID == nil || *cloudSigmaMachine.Spec.ProviderID == "" {
-			providerID := fmt.Sprintf("cloudsigma://%s", server.UUID)
-			cloudSigmaMachine.Spec.ProviderID = &providerID
+		// Ensure providerID is set and matches the current instance
+		expectedProviderID := fmt.Sprintf("cloudsigma://%s", server.UUID)
+		if cloudSigmaMachine.Spec.ProviderID == nil || *cloudSigmaMachine.Spec.ProviderID != expectedProviderID {
+			if cloudSigmaMachine.Spec.ProviderID != nil && *cloudSigmaMachine.Spec.ProviderID != "" {
+				log.Info("Correcting mismatched providerID",
+					"old", *cloudSigmaMachine.Spec.ProviderID,
+					"new", expectedProviderID)
+			}
+			cloudSigmaMachine.Spec.ProviderID = &expectedProviderID
 			if err := r.Update(ctx, cloudSigmaMachine); err != nil {
 				log.Error(err, "Failed to set providerID in spec", "instanceID", server.UUID)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
-			log.Info("Set providerID in spec", "instanceID", server.UUID, "providerID", providerID)
+			log.Info("Set providerID in spec", "instanceID", server.UUID, "providerID", expectedProviderID)
 		}
 
 		// Extract and populate network addresses from CloudSigma API
