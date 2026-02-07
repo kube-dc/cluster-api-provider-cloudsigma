@@ -181,7 +181,8 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, node *corev1.Node) e
 	hasTaint := false
 	var newTaints []corev1.Taint
 	for _, taint := range node.Spec.Taints {
-		if taint.Key == "node.cloudprovider.kubernetes.io/uninitialized" {
+		if taint.Key == "node.cloudprovider.kubernetes.io/uninitialized" ||
+			taint.Key == "node.cluster.x-k8s.io/uninitialized" {
 			hasTaint = true
 			continue
 		}

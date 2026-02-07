@@ -198,8 +198,9 @@ func main() {
 
 	// Start LoadBalancer IP pool controller (enabled by default)
 	// Requires impersonation mode for CloudSigma API access
+	var lbController *controllers.LoadBalancerController
 	if impersonationClient != nil && userEmail != "" && !lbIPPoolDisabled {
-		lbController := &controllers.LoadBalancerController{
+		lbController = &controllers.LoadBalancerController{
 			TenantClient:        reconciler.GetTenantClient(),
 			ImpersonationClient: impersonationClient,
 			UserEmail:           userEmail,
@@ -210,7 +211,7 @@ func main() {
 
 		if err := lbController.Start(ctx); err != nil {
 			klog.Errorf("Failed to start LoadBalancer controller: %v", err)
-			// Don't fatal - continue with other functionality
+			lbController = nil // Don't wait for shutdown if start failed
 		} else {
 			klog.Info("LoadBalancer IP pool controller started (auto-discovering owned IPs)")
 		}
@@ -222,5 +223,12 @@ func main() {
 
 	// Wait for context cancellation
 	<-ctx.Done()
-	klog.Info("CloudSigma CCM shutting down")
+	klog.Info("CloudSigma CCM shutting down, waiting for LB cleanup...")
+
+	// Wait for LB controller to finish cleanup (untag IPs) before exiting
+	if lbController != nil {
+		lbController.WaitForShutdown()
+	}
+
+	klog.Info("CloudSigma CCM shutdown complete")
 }

@@ -88,6 +88,9 @@ type LoadBalancerController struct {
 	// manualModeNodes tracks which nodes have already been switched to manual NIC mode
 	// key: server UUID
 	manualModeNodes map[string]bool
+
+	// done is closed after shutdown cleanup completes, so main() can wait
+	done chan struct{}
 }
 
 // CloudSigmaIP represents an IP from the CloudSigma API
@@ -105,6 +108,14 @@ type CloudSigmaServer struct {
 }
 
 
+// WaitForShutdown blocks until the controller's shutdown cleanup is complete.
+// Must be called after Start() and after the context is cancelled.
+func (c *LoadBalancerController) WaitForShutdown() {
+	if c.done != nil {
+		<-c.done
+	}
+}
+
 // Start initializes and starts the LoadBalancer controller
 func (c *LoadBalancerController) Start(ctx context.Context) error {
 	if c.Disabled {
@@ -115,6 +126,7 @@ func (c *LoadBalancerController) Start(ctx context.Context) error {
 	c.ipAssignments = make(map[string]string)
 	c.serviceIPs = make(map[string]string)
 	c.manualModeNodes = make(map[string]bool)
+	c.done = make(chan struct{})
 
 	// Discover owned IPs from CloudSigma API and recover state
 	if err := c.discoverOwnedIPs(ctx); err != nil {
@@ -246,6 +258,7 @@ func (c *LoadBalancerController) syncLoop(ctx context.Context) {
 			klog.Info("LoadBalancer sync loop stopping, cleaning up IP tags...")
 			c.cleanupAllIPTags()
 			klog.Info("LoadBalancer sync loop stopped")
+			close(c.done)
 			return
 		case <-ipRefreshTicker.C:
 			// Periodically refresh discovered IPs
