@@ -140,6 +140,9 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	drive := drives[0]
 	klog.Infof("Volume created: %s (%s)", drive.Name, drive.UUID)
 
+	// Tag the drive in CloudSigma for tracking
+	d.tagDrive(ctx, drive.UUID, req.Name)
+
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      drive.UUID,
@@ -183,6 +186,9 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	if drive.Status == "mounted" {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume %s is still mounted", req.VolumeId)
 	}
+
+	// Untag the drive before deletion
+	d.untagDrive(ctx, req.VolumeId)
 
 	// Delete the drive
 	_, err = d.cloudClient.Drives.Delete(ctx, req.VolumeId)

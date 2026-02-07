@@ -55,12 +55,13 @@ const (
 
 // Driver represents the CloudSigma CSI driver
 type Driver struct {
-	name     string
-	version  string
-	nodeID   string
-	region   string
-	endpoint string
-	mode     Mode
+	name        string
+	version     string
+	nodeID      string
+	region      string
+	endpoint    string
+	mode        Mode
+	clusterName string
 
 	cloudClient *cloudsigma.Client
 
@@ -92,6 +93,7 @@ type Config struct {
 	CloudSigmaPassword string
 	CloudSigmaToken    string // OAuth access token (preferred)
 	TokenFile          string // Path to token file (refreshed by CCM)
+	ClusterName        string // Cluster name for tagging drives
 }
 
 // NewDriver creates a new CloudSigma CSI driver
@@ -125,6 +127,7 @@ func NewDriver(cfg *Config) (*Driver, error) {
 		region:            cfg.Region,
 		endpoint:          cfg.Endpoint,
 		mode:              cfg.Mode,
+		clusterName:       cfg.ClusterName,
 		cloudClient:       cloudClient,
 		serverAttachLocks: make(map[string]*sync.Mutex),
 	}

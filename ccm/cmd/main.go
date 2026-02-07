@@ -187,6 +187,7 @@ func main() {
 			ImpersonationClient: impersonationClient,
 			UserEmail:           userEmail,
 			Region:              cloudsigmaRegion,
+			ClusterName:         clusterName,
 			Enabled:             true,
 		}
 

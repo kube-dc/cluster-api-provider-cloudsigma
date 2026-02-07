@@ -56,6 +56,8 @@ type CSITokenController struct {
 	UserEmail string
 	// Region is the CloudSigma region
 	Region string
+	// ClusterName is the name of the cluster, used for tagging drives
+	ClusterName string
 	// Enabled indicates if CSI token provisioning is enabled
 	Enabled bool
 }
@@ -171,6 +173,7 @@ func (c *CSITokenController) ensureCSIToken(ctx context.Context) error {
 			"access_token": token,
 			"region":       c.Region,
 			"user_email":   c.UserEmail,
+			"cluster_name": c.ClusterName,
 		},
 	}
 

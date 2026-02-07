@@ -32,6 +32,7 @@ func main() {
 	var cloudsigmaPassword string
 	var cloudsigmaToken string
 	var tokenFile string
+	var clusterName string
 
 	flag.StringVar(&endpoint, "endpoint", "unix:///csi/csi.sock", "CSI endpoint")
 	flag.StringVar(&region, "region", os.Getenv("CLOUDSIGMA_REGION"), "CloudSigma region")
@@ -39,6 +40,7 @@ func main() {
 	flag.StringVar(&cloudsigmaPassword, "cloudsigma-password", os.Getenv("CLOUDSIGMA_PASSWORD"), "CloudSigma API password (legacy)")
 	flag.StringVar(&cloudsigmaToken, "cloudsigma-token", os.Getenv("CLOUDSIGMA_ACCESS_TOKEN"), "CloudSigma API access token (recommended)")
 	flag.StringVar(&tokenFile, "token-file", os.Getenv("CLOUDSIGMA_TOKEN_FILE"), "Path to file containing access token (refreshed by CCM)")
+	flag.StringVar(&clusterName, "cluster-name", os.Getenv("CLUSTER_NAME"), "Cluster name for tagging drives in CloudSigma")
 
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -74,6 +76,7 @@ func main() {
 		CloudSigmaPassword: cloudsigmaPassword,
 		CloudSigmaToken:    cloudsigmaToken,
 		TokenFile:          tokenFile,
+		ClusterName:        clusterName,
 	}
 
 	drv, err := driver.NewDriver(cfg)
