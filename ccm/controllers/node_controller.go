@@ -103,8 +103,9 @@ func (r *NodeReconciler) refreshCloudSigmaClient(ctx context.Context) error {
 			return fmt.Errorf("failed to get impersonated token: %w", err)
 		}
 		cred := cloudsigma.NewTokenCredentialsProvider(token)
-		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
-		klog.V(2).Infof("CloudSigma client refreshed with impersonation for region: %s", region)
+		directLocation := "direct." + region
+		r.cloudsigmaClient = cloudsigma.NewClient(cred, cloudsigma.WithLocation(directLocation))
+		klog.V(2).Infof("CloudSigma client refreshed with impersonation for region: %s (using direct endpoint)", region)
 		return nil
 	}
 

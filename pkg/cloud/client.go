@@ -91,10 +91,15 @@ func NewClientWithImpersonation(ctx context.Context, impersonationClient *auth.I
 	}
 
 	// Create SDK client with token-based authentication
+	// IMPORTANT: Use "direct.<region>" for the SDK location when impersonating.
+	// The impersonation token is issued by the service provider API at direct.<region>.cloudsigma.com
+	// and must be used on that same endpoint. Using it on <region>.cloudsigma.com creates resources
+	// in the service account's default user instead of the impersonated user.
 	cred := cloudsigma.NewTokenCredentialsProvider(token)
-	sdk := cloudsigma.NewClient(cred, cloudsigma.WithLocation(region))
+	directLocation := "direct." + region
+	sdk := cloudsigma.NewClient(cred, cloudsigma.WithLocation(directLocation))
 
-	// Determine API endpoint based on region
+	// API endpoint for direct HTTP calls (must match SDK endpoint)
 	apiEndpoint := fmt.Sprintf("https://direct.%s.cloudsigma.com/api/2.0", region)
 
 	return &Client{
@@ -122,9 +127,10 @@ func (c *Client) RefreshImpersonatedToken(ctx context.Context) error {
 		return fmt.Errorf("failed to refresh impersonated token: %w", err)
 	}
 
-	// Recreate SDK client with new token
+	// Recreate SDK client with new token (use direct endpoint for impersonation)
 	cred := cloudsigma.NewTokenCredentialsProvider(token)
-	c.sdk = cloudsigma.NewClient(cred, cloudsigma.WithLocation(c.region))
+	directLocation := "direct." + c.region
+	c.sdk = cloudsigma.NewClient(cred, cloudsigma.WithLocation(directLocation))
 	c.accessToken = token
 
 	return nil
